@@ -1,7 +1,7 @@
 CC := g++
-CFLAGS := -std=c++20 -Wall
+CFLAGS := -std=c++20 -Wall -Wextra
 DEBUG_FLAG := -DDEBUG -g
-LIBS := -lfmt
+LIBS := -lfmt -lSDL2
 
 SRC_FILES := main.cpp
 

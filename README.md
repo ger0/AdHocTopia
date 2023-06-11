@@ -1,4 +1,5 @@
-# An Ad-Hoc platformer game with the use of POSIX sockets.
+# A platformer game for Ad-Hoc networks
+An ad-hoc platformer made with the use of POSIX socket API and SDL2 graphics library.
 
 ## Building:
 ```sh
@@ -6,6 +7,7 @@ make
 ```
 
 ## Dependencies:
+- SDL2
 - fmt
 
 ## Testing:

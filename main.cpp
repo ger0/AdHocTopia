@@ -41,27 +41,11 @@ template <class F> deferrer<F> operator*(defer_dummy, F f) { return {f}; }
 #define DEFER(LINE) DEFER_(LINE)
 #define defer auto DEFER(__LINE__) = defer_dummy{} *[&]()
 #endif // defer
-
-bool create_adhoc_network(c_str device, c_str essid, c_str ip_addr, c_str net_mask) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        LOG_ERR("Failed to create socket");
-        return false;
-    }
-    // close socket opon returning
-    defer {close(sock);};
-    
-    struct ifreq ifr; // interface settings
+// setup adhoc mode and essid
+bool setup_wlan(int sock, c_str device, c_str essid) {
     struct iwreq iwr; // wireless  settings
-    memset(&ifr, 0, sizeof(ifr));
     memset(&iwr, 0, sizeof(iwr));
-    strncpy(ifr.ifr_name, device, IFNAMSIZ);
-    strncpy(iwr.ifr_ifrn.ifrn_name, device, IFNAMSIZ);
-
-    if (ioctl(sock, SIOCGIFFLAGS, &ifr)) {
-        LOG_ERR("Failed to retrieve interface flags");
-        return false;
-    }
+    strncpy(iwr.ifr_name, device, IFNAMSIZ);
 
     memset(&iwr.u, 0, sizeof(iwr.u));
     iwr.u.mode |= IW_MODE_ADHOC;
@@ -77,7 +61,18 @@ bool create_adhoc_network(c_str device, c_str essid, c_str ip_addr, c_str net_ma
         LOG_ERR("Failed to set the ESSID");
         return false;
     }
+    return true;
+}
+// setup ip_address, netmask and a few flags
+bool setup_interface(int sock, c_str device, c_str ip_addr, c_str net_mask) {
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, device, IFNAMSIZ);
 
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr)) {
+        LOG_ERR("Failed to retrieve interface flags");
+        return false;
+    }
     // ip address 
     sockaddr_in sock_addr;
     memset(&sock_addr, 0, sizeof(sock_addr));
@@ -113,6 +108,19 @@ bool create_adhoc_network(c_str device, c_str essid, c_str ip_addr, c_str net_ma
         LOG_ERR("Failed to set interface flags");
 		return false;
     }
+    return true;
+}
+
+bool create_adhoc_network(c_str device, c_str essid, c_str ip_addr, c_str net_mask) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        LOG_ERR("Failed to create socket");
+        return false;
+    }
+    // close socket opon returning
+    defer {close(sock);};
+    if (!setup_wlan(sock, device, essid)) return false;
+    if (!setup_interface(sock, device, ip_addr, net_mask)) return false;
     LOG_DBG("Ad hoc network created successfully!");
     return true;
 }
@@ -128,11 +136,12 @@ bool enable_sock_broadcast(int sfd) {
     return true;
 }
 
-bool bind_to_device(int sfd, c_str device) {
+bool bind_addr(int sfd, c_str device, sockaddr_in &sin_addr) {
     struct ifreq ifr;
-
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, device, sizeof(ifr.ifr_name));
+
+    // bind a specific device to the socket ( might not be used later on )
     if (setsockopt(sfd, SOL_SOCKET, SO_BINDTODEVICE,
                    (void *)&ifr, sizeof(ifr)) < 0) {
         LOG_ERR("Failed to bind device to the socket");
@@ -143,6 +152,10 @@ bool bind_to_device(int sfd, c_str device) {
         LOG_ERR("Failed to set SO_REUSEADDR");
         return false;
     }
+    if (bind(sfd, (sockaddr*)&sin_addr, sizeof(sin_addr)) == -1) {
+        LOG_ERR("Error during socket binding");
+		return false;
+    };
     return true;
 }
 
@@ -177,9 +190,7 @@ int main(int argc, char* argv[]) {
     int sfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     defer {close(sfd);};
 
-    bind_to_device(sfd, device);
-    if (bind(sfd, (sockaddr*)&sin_addr, sizeof(sin_addr)) == -1) {
-        LOG_ERR("Error during socket binding");
+    if(!bind_addr(sfd, device, sin_addr)) {
         perror("What");
 		return EXIT_FAILURE;
     };
@@ -187,6 +198,7 @@ int main(int argc, char* argv[]) {
     if (!enable_sock_broadcast(sfd)) {
         exit(EXIT_FAILURE);
     }
+
     char buf[32] = "Hello World!";
     if (argc == 5) {
         strcpy(buf, argv[4]);

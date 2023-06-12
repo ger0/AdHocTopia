@@ -45,7 +45,6 @@ void broadcast(Packet &pkt) {
         buff[i] = htonl(buff[i]);
     }
 
-    int dong = 2;
     int rv = sendto(sfd, (void*)&ns_pkt, sizeof(ns_pkt), 0, (sockaddr*)&broadcast_addr, sl);
     if (rv <= 0) {
         LOG_ERR("Did not send the entire packet: {}", rv);
@@ -125,7 +124,6 @@ bool setup(NetConfig &cfg) {
     if (!setup_interface(sock)) return false;
     LOG_DBG("Ad hoc network created successfully!");
 
-    LOG("BROADCAST {}", config.bd_addr);
     broadcast_addr = {
         .sin_family     = AF_INET,
         .sin_port       = htons(config.port),

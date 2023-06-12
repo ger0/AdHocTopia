@@ -13,11 +13,13 @@
 #include "networking.hpp"
 
 constexpr uint PORT = 2113;
-constexpr uint MAX_BUFFER_SIZE = 1024;
+
+constexpr double TICK_RATE      = 32;
+constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
 struct Map {
-    static constexpr int WIDTH     = 800;
-    static constexpr int HEIGHT    = 600;
+    static constexpr int WIDTH  = 800;
+    static constexpr int HEIGHT = 600;
 } MAP;
 
 struct Player {
@@ -31,7 +33,7 @@ struct Player {
         int WIDTH   = 10;
         int HEIGHT  = 20;
     } SIZE;
-    static const uint VELOCITY = 1;
+    static const uint VELOCITY = 10;
     
     int x = 0;
     int y = 0;
@@ -122,10 +124,8 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    int coord[2] = {0, 0};
-
     // -------------------------- sdl  init ---------------------------
-    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
     SDL_Window* window = SDL_CreateWindow(
         argv[0], SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         MAP.WIDTH, MAP.HEIGHT, SDL_WINDOW_SHOWN
@@ -146,20 +146,21 @@ int main(int argc, char* argv[]) {
     SDL_Event event;
     bool is_running = true;
 
+    u64 prev_tick = SDL_GetTicks64();
+    u64 curr_tick = prev_tick;
+    u64 delta_time;
+
+    constexpr u64 fps_cap = 240;
+    constexpr u64 frame_min_dur = 1'000 / fps_cap;
+    u64 prev_frame = SDL_GetTicks64();
+    u64 delta_frame;
+
     while (is_running) {
         while (SDL_PollEvent(&event) != 0) {
             if (event.type == SDL_QUIT) is_running = false;
             player.handle_event(event);
         }
         player.move();
-        coord[0] = player.x;
-        coord[1] = player.y;
-        networking::Packet pkt = {
-            .opcode     = networking::Opcode::Coord,
-            .player_num = player_num,
-            .payload    = {coord[0], coord[1]}
-        };
-        networking::broadcast(pkt);
         auto packets = networking::poll();
         for (const auto &pkt: packets) {
             if (pkt.opcode != networking::Opcode::Coord) continue;
@@ -174,6 +175,27 @@ int main(int argc, char* argv[]) {
         player.render(renderer);
         enemy.render(renderer);
         SDL_RenderPresent(renderer);
+
+        // tick
+        networking::Packet pkt = {
+            .opcode     = networking::Opcode::Coord,
+            .player_num = player_num,
+            .payload    = {player.x, player.y}
+        };
+
+        curr_tick = SDL_GetTicks64();
+        delta_time = curr_tick - prev_tick;
+        if ((double)delta_time >= TICK_MSEC_DUR) {
+            LOG_DBG("Broadcasting Data...");
+            networking::broadcast(pkt);
+            prev_tick = curr_tick;
+        }
+
+        delta_frame = curr_tick - prev_frame;
+        if (delta_frame < frame_min_dur) {
+            SDL_Delay(uint(frame_min_dur - delta_frame));
+            prev_frame = curr_tick;
+        }
     }
     return EXIT_SUCCESS;
 }

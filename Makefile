@@ -1,5 +1,5 @@
 CC := g++
-CFLAGS := -std=c++20 -Wall -Wextra
+CFLAGS := -std=c++20 -Wall
 DEBUG_FLAG := -DDEBUG -g
 LIBS := -lfmt -lSDL2
 

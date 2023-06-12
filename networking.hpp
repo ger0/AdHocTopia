@@ -8,12 +8,12 @@
 namespace networking {
 
 enum Opcode: byte {
-    Hello,
-    Ack,
-    Ask_map,
-    Send_map,
-    Coord,
-    Malformed   = 99
+    Hello       = 0xF0 ,
+    Ack         = 0x01,
+    Ask_map     = 0x02,
+    Send_map    = 0x03,
+    Coord       = 0x04,
+    Malformed   = 0xFF 
 };
 
 union Data {

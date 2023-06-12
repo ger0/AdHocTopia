@@ -22,7 +22,6 @@ std::unordered_map<byte, sockaddr_in> player_addrs;
 bool setup_wlan(int sock);
 bool setup_interface(int sock);
 
-// epoll
 static constexpr uint MAX_EVENTS = 8;
 static epoll_event ev, events[MAX_EVENTS];
 
@@ -35,22 +34,42 @@ static sockaddr_in broadcast_addr;
 static sockaddr_in this_addr;
 
 static NetConfig config;
+// network to hardware
+Packet ntohpkt(Packet &pkt) {
+    Packet h_pkt = {
+        .opcode     = pkt.opcode,
+        .player_num = pkt.player_num,
+        .seq        = ntohl(pkt.seq),
+        .payload    = pkt.payload
+    };
 
-void broadcast(Packet &pkt) {
-    Packet ns_pkt = {
+    uint payload_size = sizeof(h_pkt.payload) / sizeof(uint);
+    uint *buff = (uint*)&h_pkt.payload;
+    for (uint i = 0; i < payload_size; ++i) {
+        buff[i] = ntohl(buff[i]);
+    }
+    return h_pkt;
+};
+// hardware to network
+Packet htonpkt(Packet &pkt) {
+    Packet n_pkt = {
         .opcode     = pkt.opcode,
         .player_num = pkt.player_num,
         .seq        = htonl(pkt.seq),
         .payload    = pkt.payload
     };
 
-    uint payload_size = sizeof(ns_pkt.payload) / sizeof(uint);
-    uint *buff = (uint*)&ns_pkt.payload;
+    uint payload_size = sizeof(n_pkt.payload) / sizeof(uint);
+    uint *buff = (uint*)&n_pkt.payload;
     for (uint i = 0; i < payload_size; ++i) {
         buff[i] = htonl(buff[i]);
     }
+    return n_pkt;
+};
 
-    int rv = sendto(sfd, (void*)&ns_pkt, sizeof(ns_pkt), 0, (sockaddr*)&broadcast_addr, sl);
+void broadcast(Packet &pkt) {
+    Packet n_pkt = htonpkt(pkt);
+    int rv = sendto(sfd, (void*)&n_pkt, sizeof(n_pkt), 0, (sockaddr*)&broadcast_addr, sl);
     if (rv <= 0) {
         LOG_ERR("Did not send the entire packet: {}", rv);
         perror("what");
@@ -237,26 +256,14 @@ bool setup_interface(int sock) {
     return true;
 }
 
-Packet ntohpkt(Packet &pkt) {
-    Packet h_pkt = {
-        .opcode     = pkt.opcode,
-        .player_num = pkt.player_num,
-        .seq        = ntohl(pkt.seq),
-        .payload    = pkt.payload
-    };
-
-    uint payload_size = sizeof(h_pkt.payload) / sizeof(uint);
-    uint *buff = (uint*)&h_pkt.payload;
-    for (uint i = 0; i < payload_size; ++i) {
-        buff[i] = ntohl(buff[i]);
-    }
-    return h_pkt;
-};
-
 void ack_to_player(byte player_num) {
     Packet pkt;
     pkt.opcode = Opcode::Ack;
+    pkt.player_num = player_num;
+    pkt = htonpkt(pkt);
+
     const auto& s_addr = player_addrs[player_num];
+    //LOG("SENDING ACK TO {} {}", player_num, s_addr.sin_addr.s_addr);
     int rv = sendto(sfd, (void*)&pkt, sizeof(pkt), 0, (sockaddr*)&s_addr, sl);
     if (rv != sizeof(pkt)) {
         LOG_ERR("Not enough bytes sent!!! {}", rv);
@@ -270,7 +277,6 @@ std::vector<Packet> poll() {
     if (nfds == -1) {
         LOG_ERR("Epoll_wait failed");
         perror("What"); 
-        pkt.opcode = Opcode::Malformed;
         return packets;
     }
     sockaddr_in s_addr;
@@ -288,13 +294,13 @@ std::vector<Packet> poll() {
                     perror("Failed to receive");
                     break;
                 }
-            } // else receive the packet
-            if (s_addr.sin_addr.s_addr != this_addr.sin_addr.s_addr) {
-                pkt = ntohpkt(pkt);
-                packets.push_back(pkt);
-                if (!player_addrs.contains(pkt.player_num)) {
-                    player_addrs.emplace(pkt.player_num, s_addr);
-                }
+            } // else receive the packet if its not from this address
+            if (s_addr.sin_addr.s_addr == this_addr.sin_addr.s_addr) continue;
+            pkt = ntohpkt(pkt);
+            packets.push_back(pkt);
+            if (!player_addrs.contains(pkt.player_num) && pkt.opcode != Ack) {
+                LOG("Added player {} address {} to the list!", pkt.player_num, s_addr.sin_addr.s_addr);
+                player_addrs.emplace(pkt.player_num, s_addr);
             }
         }
     }

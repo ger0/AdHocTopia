@@ -22,6 +22,8 @@ constexpr SDL_PixelFormatEnum TEXTURE_FORMAT = SDL_PIXELFORMAT_RGBA8888;
 constexpr double TICK_RATE      = 32;
 constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
+uint SEED = 0;
+
 enum CellType: byte {
     WALL    = 0xff,
     START   = 0xf0,
@@ -34,7 +36,7 @@ enum GameState {
     Connecting,
     Playing,
     Ending,
-} GAME_STATE;
+};
 
 SDL_Colour get_cell_colour(CellType cell) {
     switch (cell) {
@@ -43,7 +45,7 @@ SDL_Colour get_cell_colour(CellType cell) {
         case CellType::FINISH:  
             return {255,0,0,255};
         case CellType::WALL:
-            return {150,150,150,255};
+            return {100,100,100,255};
         default:
             return {255,0,255,255};
     }
@@ -55,24 +57,41 @@ struct Map {
     static constexpr int SIZE   = WIDTH * HEIGHT;
     std::array<byte, SIZE> data;
 
-    void write_at(const int x, const int y, const byte value, const int size) {
+    Map() {
+        data.fill(0);
+    }
+
+    SDL_Texture *_texture   = nullptr;
+    bool        _is_drawing = false;
+    CellType    _brush_type = CellType::WALL;
+
+    void _write_at(const int x, const int y, const int size) {
         for (int iy = y; iy < y + size; iy++) {
             for (int ix = x; ix < x + size; ix++) {
                 auto idx = ix + iy * HEIGHT;
                 if (idx >= SIZE || idx < 0) continue;
-                data.at(ix + iy * HEIGHT) = value;
+                data.at(ix + iy * HEIGHT) = _brush_type;
             }
         }
     }
-    Map() {
-        data.fill(0);
+    void _draw_at(const int x, const int y, const int size) {
+        // Set the target texture
+        SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), _texture);
+
+        // Draw
+        SDL_Rect rect = {x, y, size, size};
+        SDL_Color col = get_cell_colour(_brush_type);
+        SDL_SetRenderDrawColor(
+            SDL_GetRenderer(SDL_GetWindowFromID(1)), col.r, col.g, col.g, col.a);
+        SDL_RenderFillRect(
+            SDL_GetRenderer(SDL_GetWindowFromID(1)), &rect);
+
+        // Reset the target to the default rendering target (the window)
+        SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), NULL);
     }
-    void handle_event(SDL_Texture* texture, SDL_Event &event) {
+
+    void handle_event(SDL_Event &event) {
         int x, y;
-        
-        // static vars
-        static bool _is_drawing;
-        static CellType _brush_type;
 
         const auto& ksymbl  = event.key.keysym.sym;
         const auto& embttn  = event.button;
@@ -105,40 +124,27 @@ struct Map {
             y = event.motion.y;
             break;
         } 
+        if (_is_drawing) {
+            constexpr int size = 10;
+            this->_draw_at(x, y, size);
+            this->_write_at(x, y, size);
+        }
 
-        if (!_is_drawing) return;
-
-        constexpr int size = 10;
-
-        // Set the target texture
-        SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), texture);
-
-        // Draw
-        SDL_Rect rect = {x, y, size, size};
-        SDL_Color col = get_cell_colour(_brush_type);
-        SDL_SetRenderDrawColor(
-            SDL_GetRenderer(SDL_GetWindowFromID(1)), col.r, col.g, col.g, col.a);
-        SDL_RenderFillRect(
-            SDL_GetRenderer(SDL_GetWindowFromID(1)), &rect);
-        this->write_at(x, y, _brush_type, size);
-
-        // Reset the target to the default rendering target (the window)
-        SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), NULL);
     }
 } MAP;
 
 struct Player {
+    static constexpr uint VELOCITY = 3;
+    const struct {
+        int WIDTH   = 4;
+        int HEIGHT  = 6;
+    } SIZE;
+
     byte player_num;
     bool should_predict; // should predict the movement
     SDL_Colour colour;
-
-    const struct {
-        int WIDTH   = 10;
-        int HEIGHT  = 20;
-    } SIZE;
-
-    static const uint VELOCITY = 10;
     
+    // position
     int x = 0;
     int y = 0;
 
@@ -208,12 +214,71 @@ struct Player {
     }
 };
 
+GameState poll_events(GameState state, SDL_Event &event, Player &player) {
+    while (SDL_PollEvent(&event) != 0) {
+        if (event.type == SDL_QUIT) {
+            return GameState::Ending;
+        }
+        if (state == Playing) {
+            player.handle_event(event);
+        }
+        else if (state == Drawing) {
+            MAP.handle_event(event);
+        } 
+        if (event.type == SDL_KEYDOWN 
+            && event.key.keysym.sym == SDLK_SPACE) {
+            if (state == Drawing) state = Connecting;
+            LOG("Trying to connect to other players...", state);
+        }
+    }
+    return state;
+}
+
+GameState poll_packets(GameState state, std::unordered_map<byte, Player> &enemies) {
+    auto packets = networking::poll();
+
+    // [TODO]: Refactor
+    for (const auto &pkt: packets) {
+        // if (pkt.player_num == player_num) continue;
+        // updating the position of a player
+        if (pkt.opcode == networking::Opcode::Coord) {
+            //if (!enemies.contains(pkt.player_num)) continue;
+            auto [x, y]     = pkt.payload.move.coord;
+            auto [dx, dy]   = pkt.payload.move.d_vel;
+            LOG_DBG("Received coords: {}, {}", x, y);
+            auto& enemy = enemies[pkt.player_num];
+            enemy.place(x, y, dx, dy);
+            enemy.should_predict = false;
+        } 
+        // adding a new player
+        else if (pkt.opcode == networking::Opcode::Hello) {
+            // sending THIS PLAYER'S id with ACK
+            networking::ack_to_player(pkt.player_num);
+            if (enemies.contains(pkt.player_num)) continue;
+            Player enemy;
+            enemy.colour = {
+                .r = byte(155 + SEED % 100),
+                .g = byte((SEED / 256) % 256),
+                .b = byte((SEED / (256 * 256)) % 256),
+                .a = byte(255)
+            };
+            enemies.emplace(pkt.player_num, enemy);
+            LOG("Player: {} connected to the game!", pkt.player_num);
+        }
+        else if (pkt.opcode == networking::Opcode::Ack) {
+            LOG("Received ACK from player {}", pkt.player_num);
+            state = Playing;
+        }
+    }
+    return state;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         LOG("Usage: {} <device> <essid> <ip_address>", argv[0]);
         return EXIT_FAILURE;
     }
-    GAME_STATE = Initializing;
+    GameState game_state = Initializing;
     const char net_msk[16]    = "255.255.255.0";
     const char bd_addr[16]    = "15.0.0.255";
     char ip_addr[16]    = "15.0.0.";
@@ -237,16 +302,23 @@ int main(int argc, char* argv[]) {
     // -------------------------- sdl  init ---------------------------
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
     SDL_Window* window = SDL_CreateWindow(
-        argv[0], SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        argv[0], 
+        SDL_WINDOWPOS_UNDEFINED, 
+        SDL_WINDOWPOS_UNDEFINED,
         MAP.WIDTH, MAP.HEIGHT, SDL_WINDOW_SHOWN
     );
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    SDL_Renderer* renderer = SDL_CreateRenderer(
+        window, 
+        -1, 
+        SDL_RENDERER_ACCELERATED
+    );
     SDL_Texture* map_texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_RGBA8888,
         SDL_TEXTUREACCESS_TARGET,
         MAP.WIDTH, MAP.HEIGHT 
     );
+    MAP._texture = map_texture;
 
     defer {SDL_DestroyTexture(map_texture);};
     defer {SDL_DestroyRenderer(renderer);};
@@ -264,14 +336,13 @@ int main(int argc, char* argv[]) {
     player.colour = {255, 255, 255, 255};
     player.player_num = player_num;
 
-    GAME_STATE = Drawing;
+    game_state = Drawing;
 
     srand(time(NULL));
-    uint seed = rand();
+    SEED = rand();
 
     // -------------------------- main loop ---------------------------
     SDL_Event event;
-    bool is_running = true;
 
     u64 prev_tick = SDL_GetTicks64();
     u64 curr_tick = prev_tick;
@@ -282,65 +353,15 @@ int main(int argc, char* argv[]) {
     u64 prev_frame = SDL_GetTicks64();
     u64 delta_frame;
 
-    while (is_running) {
-        // [TODO]: Refactor
-        while (SDL_PollEvent(&event) != 0) {
-            if (event.type == SDL_QUIT) {
-                is_running = false;
-            }
-            if (GAME_STATE == Playing) {
-                player.handle_event(event);
-            }
-            else if (GAME_STATE == Drawing) {
-                MAP.handle_event(map_texture, event);
-            } 
-            if (event.type == SDL_KEYDOWN 
-                && event.key.keysym.sym == SDLK_SPACE) {
-                if (GAME_STATE == Drawing) GAME_STATE = Connecting;
-                LOG("Trying to connect to other players...", GAME_STATE);
-            }
-        }
-        auto packets = networking::poll();
-        // [TODO]: Refactor
-        for (const auto &pkt: packets) {
-            // if (pkt.player_num == player_num) continue;
-            // updating the position of a player
-            if (pkt.opcode == networking::Opcode::Coord) {
-                //if (!enemies.contains(pkt.player_num)) continue;
-                auto [x, y]     = pkt.payload.move.coord;
-                auto [dx, dy]   = pkt.payload.move.d_vel;
-                LOG_DBG("Received coords: {}, {}", x, y);
-                auto& enemy = enemies[pkt.player_num];
-                enemy.place(x, y, dx, dy);
-                enemy.should_predict = false;
-            } 
-            // adding a new player
-            else if (pkt.opcode == networking::Opcode::Hello) {
-                // sending THIS PLAYER'S id with ACK
-                networking::ack_to_player(pkt.player_num);
-                if (enemies.contains(pkt.player_num)) continue;
-                Player enemy;
-                enemy.colour = {
-                    .r = byte(155 + seed % 100),
-                    .g = byte((seed / 256) % 256),
-                    .b = byte((seed / (256 * 256)) % 256),
-                    .a = byte(255)
-                };
-                enemies.emplace(pkt.player_num, enemy);
-                LOG("Player: {} connected to the game!", pkt.player_num);
-            }
-            // possible bug?
-            else if (pkt.opcode == networking::Opcode::Ack) {
-                LOG("Received ACK from player {}", pkt.player_num);
-                LOG("ACK: enemy {} mine {}", pkt.player_num, player_num);
-                GAME_STATE = Playing;
-            }
-        }
+    // [TODO] Refactor
+    while (game_state != GameState::Ending) {
+        game_state = poll_events(game_state, event, player);
+        game_state = poll_packets(game_state, enemies);
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, map_texture, NULL, NULL);
-        if (GAME_STATE == Playing) {
+        if (game_state == Playing) {
             player.move();
             for (auto& [_, enemy]: enemies) {
                 if (enemy.should_predict) enemy.move();
@@ -364,10 +385,10 @@ int main(int argc, char* argv[]) {
         delta_time = curr_tick - prev_tick;
         if ((double)delta_time >= TICK_MSEC_DUR) {
             LOG_DBG("Broadcasting Data...");
-            if (GAME_STATE == Playing) {
+            if (game_state == Playing) {
                 networking::broadcast(pkt);
             }
-            else if (GAME_STATE == Connecting) {
+            else if (game_state == Connecting) {
                 pkt.opcode = networking::Opcode::Hello;
                 networking::broadcast(pkt);
             }

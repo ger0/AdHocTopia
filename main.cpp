@@ -7,8 +7,6 @@
 #include <vector>
 #include <array>
 
-//#include <net/if.h>
-
 #include <SDL2/SDL.h>
 
 #include "types.hpp"
@@ -16,8 +14,6 @@
 
 constexpr uint PORT = 2113;
 constexpr uint MAP_PORT = 2114;
-
-constexpr SDL_PixelFormatEnum TEXTURE_FORMAT = SDL_PIXELFORMAT_RGBA8888;
 
 constexpr double TICK_RATE      = 32;
 constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
@@ -205,6 +201,7 @@ struct Player {
             }
         }
     }
+
     void render(SDL_Renderer* renderer) const {
         SDL_Rect rect = { x, y, SIZE.WIDTH, SIZE.HEIGHT };
         const auto& c = colour;
@@ -228,7 +225,7 @@ GameState poll_events(GameState state, SDL_Event &event, Player &player) {
         if (event.type == SDL_KEYDOWN 
             && event.key.keysym.sym == SDLK_SPACE) {
             if (state == Drawing) state = Connecting;
-            LOG("Trying to connect to other players...", state);
+            LOG_DBG("Trying to connect to other players...", state);
         }
     }
     return state;
@@ -245,7 +242,6 @@ GameState poll_packets(GameState state, std::unordered_map<byte, Player> &enemie
             //if (!enemies.contains(pkt.player_num)) continue;
             auto [x, y]     = pkt.payload.move.coord;
             auto [dx, dy]   = pkt.payload.move.d_vel;
-            LOG_DBG("Received coords: {}, {}", x, y);
             auto& enemy = enemies[pkt.player_num];
             enemy.place(x, y, dx, dy);
             enemy.should_predict = false;
@@ -266,7 +262,7 @@ GameState poll_packets(GameState state, std::unordered_map<byte, Player> &enemie
             LOG("Player: {} connected to the game!", pkt.player_num);
         }
         else if (pkt.opcode == networking::Opcode::Ack) {
-            LOG("Received ACK from player {}", pkt.player_num);
+            LOG("Player: {} accepted to the game!", pkt.player_num);
             state = Playing;
         }
     }
@@ -336,13 +332,13 @@ int main(int argc, char* argv[]) {
     player.colour = {255, 255, 255, 255};
     player.player_num = player_num;
 
-    game_state = Drawing;
 
     srand(time(NULL));
     SEED = rand();
 
     // -------------------------- main loop ---------------------------
     SDL_Event event;
+    game_state = Drawing;
 
     u64 prev_tick = SDL_GetTicks64();
     u64 curr_tick = prev_tick;
@@ -384,7 +380,6 @@ int main(int argc, char* argv[]) {
         curr_tick = SDL_GetTicks64();
         delta_time = curr_tick - prev_tick;
         if ((double)delta_time >= TICK_MSEC_DUR) {
-            LOG_DBG("Broadcasting Data...");
             if (game_state == Playing) {
                 networking::broadcast(pkt);
             }

@@ -16,7 +16,6 @@
 
 namespace networking {
 
-
 std::unordered_map<byte, sockaddr_in> player_addrs;
 
 bool setup_wlan(int sock);
@@ -263,7 +262,6 @@ void ack_to_player(byte player_num) {
     pkt = htonpkt(pkt);
 
     const auto& s_addr = player_addrs[player_num];
-    //LOG("SENDING ACK TO {} {}", player_num, s_addr.sin_addr.s_addr);
     int rv = sendto(sfd, (void*)&pkt, sizeof(pkt), 0, (sockaddr*)&s_addr, sl);
     if (rv != sizeof(pkt)) {
         LOG_ERR("Not enough bytes sent!!! {}", rv);
@@ -299,7 +297,8 @@ std::vector<Packet> poll() {
             pkt = ntohpkt(pkt);
             packets.push_back(pkt);
             if (!player_addrs.contains(pkt.player_num) && pkt.opcode != Ack) {
-                LOG("Added player {} address {} to the list!", pkt.player_num, s_addr.sin_addr.s_addr);
+                LOG_DBG("Added player's: {} address: {} to the list of known players", 
+                    pkt.player_num, s_addr.sin_addr.s_addr);
                 player_addrs.emplace(pkt.player_num, s_addr);
             }
         }

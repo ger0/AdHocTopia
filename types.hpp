@@ -1,6 +1,8 @@
 #ifndef ADHTP_TYPES_HDR
 #define ADHTP_TYPES_HDR
 
+#define DEBUG // remove later on
+
 #include <cstdint>
 #include <fmt/ranges.h>
 #include <fmt/core.h>

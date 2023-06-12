@@ -12,4 +12,4 @@ make
 
 ## Testing:
 It is possible to emulate wlan interfaces `with mac80211_hwsim` kernel module.
-One will need to configure network namespaces to configure emulated interfaces properly.
+Network namespaces need to be configured to emulate wlan interfaces properly.

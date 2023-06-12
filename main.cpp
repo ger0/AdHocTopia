@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <unordered_map>
 #include <vector>
 #include <array>
 
@@ -18,11 +19,52 @@ constexpr double TICK_RATE      = 32;
 constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
 struct Map {
-    static constexpr int WIDTH  = 800;
-    static constexpr int HEIGHT = 600;
+    static constexpr int WIDTH  = 1280;
+    static constexpr int HEIGHT = 720;
 } MAP;
 
+void draw_on_texture(SDL_Texture* texture, SDL_Event &event) {
+    int x, y;
+    static bool _is_drawing;
+    if (event.type == SDL_MOUSEBUTTONDOWN
+        && event.button.button == SDL_BUTTON_LEFT) {
+        _is_drawing = true;
+        x = event.button.x;
+        y = event.button.y;
+    } else if (event.type == SDL_MOUSEBUTTONUP 
+        && event.button.button == SDL_BUTTON_LEFT) {
+        _is_drawing = false;
+    } else if (event.type == SDL_MOUSEMOTION) {
+        x = event.motion.x;
+        y = event.motion.y;
+    } 
+    if (!_is_drawing) return;
+
+    // Set the target texture
+    SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), texture);
+
+    // Draw on the texture
+    SDL_Rect rect = {x, y, 10, 10 };
+    SDL_SetRenderDrawColor(
+        SDL_GetRenderer(SDL_GetWindowFromID(1)), 175, 175, 175, 255);
+    SDL_RenderFillRect(
+        SDL_GetRenderer(SDL_GetWindowFromID(1)), &rect);
+
+    // Reset the target to the default rendering target (the window)
+    SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), NULL);
+}
+
+enum GameState {
+    Initializing,
+    Drawing,
+    Connecting,
+    Playing,
+    Ending
+} GAME_STATE;
+
 struct Player {
+    byte player_num;
+    bool should_predict; // should predict the movement
     struct {
         uint r = 0;
         uint g = 0;
@@ -33,6 +75,7 @@ struct Player {
         int WIDTH   = 10;
         int HEIGHT  = 20;
     } SIZE;
+
     static const uint VELOCITY = 10;
     
     int x = 0;
@@ -41,9 +84,11 @@ struct Player {
     int vel_x = 0;
     int vel_y = 0;
 
-    void place(int x, int y) {
+    void place(int x, int y, int dx, int dy) {
         this->x = x;
         this->y = y;
+        this->vel_x = dx;
+        this->vel_y = dy;
     }
 
     void move() {
@@ -90,12 +135,12 @@ struct Player {
             }
         }
     }
-    void render(SDL_Renderer* renderer) {
-        SDL_Rect playerRect = { x, y, SIZE.WIDTH, SIZE.HEIGHT };
+    void render(SDL_Renderer* renderer) const {
+        SDL_Rect rect = { x, y, SIZE.WIDTH, SIZE.HEIGHT };
         const auto& c = colour;
         SDL_SetRenderDrawColor(renderer, 255, 75, 0, 255);
         SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, 255);
-        SDL_RenderFillRect(renderer, &playerRect);
+        SDL_RenderFillRect(renderer, &rect);
     }
 };
 
@@ -104,6 +149,7 @@ int main(int argc, char* argv[]) {
         LOG("Usage: {} <device> <essid> <ip_address>", argv[0]);
         return EXIT_FAILURE;
     }
+    GAME_STATE = Initializing;
     const char net_msk[16]    = "255.255.255.0";
     const char bd_addr[16]    = "15.0.0.255";
     char ip_addr[16]    = "15.0.0.";
@@ -131,15 +177,30 @@ int main(int argc, char* argv[]) {
         MAP.WIDTH, MAP.HEIGHT, SDL_WINDOW_SHOWN
     );
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    SDL_Texture* map_texture = SDL_CreateTexture(
+        renderer,
+        SDL_PIXELFORMAT_RGBA8888,
+        SDL_TEXTUREACCESS_TARGET,
+        MAP.WIDTH, MAP.HEIGHT 
+    );
 
+    defer {SDL_DestroyTexture(map_texture);};
     defer {SDL_DestroyRenderer(renderer);};
     defer {SDL_DestroyWindow(window);};
     defer {SDL_Quit();};
 
+    // Clear the texture to a specific color
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+    // Reset the target to the default rendering target (the window)
+    SDL_SetRenderTarget(renderer, NULL);
+
     Player player;
-    player.colour = {0, 100, 255};
-    Player enemy;
-    enemy.colour = {255, 0, 0};
+    std::unordered_map<byte, Player> enemies;
+    player.colour = {255, 255, 255};
+    player.player_num = player_num;
+
+    GAME_STATE = Drawing;
 
     // -------------------------- main loop ---------------------------
 
@@ -158,36 +219,82 @@ int main(int argc, char* argv[]) {
     while (is_running) {
         while (SDL_PollEvent(&event) != 0) {
             if (event.type == SDL_QUIT) is_running = false;
-            player.handle_event(event);
+            if (GAME_STATE == Playing) player.handle_event(event);
+            else if (GAME_STATE == Drawing) {
+                draw_on_texture(map_texture, event);
+            } 
+            if (event.type == SDL_KEYDOWN 
+                && event.key.keysym.sym == SDLK_SPACE) {
+                GAME_STATE = GAME_STATE == Drawing ? Connecting : Playing;
+                LOG("Changing state {}...", GAME_STATE);
+            }
         }
         player.move();
+
         auto packets = networking::poll();
+        // [TODO]: Refactor
         for (const auto &pkt: packets) {
-            if (pkt.opcode != networking::Opcode::Coord) continue;
-            if (pkt.player_num == player_num) continue;
-            auto [x, y] = pkt.payload.coord;
-            LOG_DBG("Received coords: {}, {}", x, y);
-            enemy.place(x, y);
+            if (pkt.opcode == networking::Opcode::Coord) {
+                if (pkt.player_num == player_num) continue;
+                auto [x, y]     = pkt.payload.move.coord;
+                auto [dx, dy]   = pkt.payload.move.d_vel;
+                LOG_DBG("Received coords: {}, {}", x, y);
+                auto& enemy = enemies[pkt.player_num];
+                enemy.place(x, y, dx, dy);
+                enemy.should_predict = false;
+            } 
+            else if (pkt.opcode == networking::Opcode::Hello) {
+                networking::ack_to_player(pkt.player_num);
+                if (enemies.contains(pkt.player_num)) continue;
+                uint seed = rand();
+                Player enemy;
+                enemy.colour = {
+                    .r = seed % 256,
+                    .g = (seed / 256) % 256,
+                    .b = (seed / (256 * 256)) % 256
+                };
+                enemies.emplace(pkt.player_num, enemy);
+                LOG("Player: {} connected to the game!", pkt.player_num);
+            }
+            // possible bug?
+            else if (pkt.opcode == networking::Opcode::Ack) {
+                GAME_STATE = Playing;
+            }
         }
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        player.render(renderer);
-        enemy.render(renderer);
+        SDL_RenderCopy(renderer, map_texture, NULL, NULL);
+        if (GAME_STATE == Playing) {
+            for (auto& [_, enemy]: enemies) {
+                if (enemy.should_predict) enemy.move();
+                else enemy.should_predict = true;
+                enemy.render(renderer);
+            }
+            player.render(renderer);
+        }
         SDL_RenderPresent(renderer);
 
         // tick
         networking::Packet pkt = {
             .opcode     = networking::Opcode::Coord,
             .player_num = player_num,
-            .payload    = {player.x, player.y}
+            .seq        = 0,
+            .payload    = {player.x, player.y, 
+                player.vel_x, player.vel_y},
         };
 
         curr_tick = SDL_GetTicks64();
         delta_time = curr_tick - prev_tick;
         if ((double)delta_time >= TICK_MSEC_DUR) {
             LOG_DBG("Broadcasting Data...");
-            networking::broadcast(pkt);
+            if (GAME_STATE == Playing) {
+                networking::broadcast(pkt);
+            }
+            else if (GAME_STATE == Connecting) {
+                pkt.opcode = networking::Opcode::Hello;
+                networking::broadcast(pkt);
+            }
             prev_tick = curr_tick;
         }
 

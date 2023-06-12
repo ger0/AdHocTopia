@@ -1,6 +1,8 @@
 #include "types.hpp"
 #include "networking.hpp"
 
+#include <unordered_map>
+
 #include <cstdlib>
 #include <cstring>
 
@@ -13,6 +15,9 @@
 #include <linux/wireless.h>
 
 namespace networking {
+
+
+std::unordered_map<byte, sockaddr_in> player_addrs;
 
 bool setup_wlan(int sock);
 bool setup_interface(int sock);
@@ -248,6 +253,16 @@ Packet ntohpkt(Packet &pkt) {
     return h_pkt;
 };
 
+void ack_to_player(byte player_num) {
+    Packet pkt;
+    pkt.opcode = Opcode::Ack;
+    const auto& s_addr = player_addrs[player_num];
+    int rv = sendto(sfd, (void*)&pkt, sizeof(pkt), 0, (sockaddr*)&s_addr, sl);
+    if (rv != sizeof(pkt)) {
+        LOG_ERR("Not enough bytes sent!!! {}", rv);
+    }
+}
+
 std::vector<Packet> poll() {
     std::vector<Packet> packets;
     Packet pkt;
@@ -277,6 +292,9 @@ std::vector<Packet> poll() {
             if (s_addr.sin_addr.s_addr != this_addr.sin_addr.s_addr) {
                 pkt = ntohpkt(pkt);
                 packets.push_back(pkt);
+                if (!player_addrs.contains(pkt.player_num)) {
+                    player_addrs.emplace(pkt.player_num, s_addr);
+                }
             }
         }
     }

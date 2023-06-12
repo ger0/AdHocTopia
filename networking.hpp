@@ -8,15 +8,19 @@
 namespace networking {
 
 enum Opcode: byte {
-    Hello       = 0,
-    Ask_map     = 1,
-    Send_map    = 2,
-    Coord       = 3,
+    Hello,
+    Ack,
+    Ask_map,
+    Send_map,
+    Coord,
     Malformed   = 99
 };
 
 union Data {
-    i32 coord[2];
+    struct {
+        i32 coord[2];
+        i32 d_vel[2];
+    } move;
 };
 
 struct Packet {
@@ -43,6 +47,8 @@ struct NetConfig {
 bool setup(NetConfig &config);
 void destroy();
 void broadcast(Packet &pkt);
+void ack_to_player(byte player_num);
 std::vector<Packet> poll();
+
 };
 #endif //ADHTP_NETWORK_HDR

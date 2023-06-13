@@ -21,6 +21,7 @@ constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 uint SEED = 0;
 
 enum CellType: byte {
+    EMPTY   = 0x00,
     WALL    = 0xff,
     START   = 0xf0,
     FINISH  = 0x0f,
@@ -42,6 +43,8 @@ SDL_Colour get_cell_colour(CellType cell) {
             return {255,0,0,255};
         case CellType::WALL:
             return {100,100,100,255};
+        case CellType::EMPTY:
+            return {0,0,0,255};
         default:
             return {255,0,255,255};
     }
@@ -59,14 +62,17 @@ struct Map {
 
     SDL_Texture *_texture   = nullptr;
     bool        _is_drawing = false;
-    CellType    _brush_type = CellType::WALL;
+    CellType    _brush_type = CellType::EMPTY;
+
+    inline byte &at(const int x, const int y) {
+        return data.at(x + y * WIDTH);
+    }
 
     void _write_at(const int x, const int y, const int size) {
         for (int iy = y; iy < y + size; iy++) {
             for (int ix = x; ix < x + size; ix++) {
-                auto idx = ix + iy * HEIGHT;
-                if (idx >= SIZE || idx < 0) continue;
-                data.at(ix + iy * HEIGHT) = _brush_type;
+                if (ix >= WIDTH || ix < 0 || iy >= HEIGHT || iy < 0) continue;
+                this->at(ix, iy) = _brush_type;
             }
         }
     }
@@ -98,8 +104,10 @@ struct Map {
                 _brush_type = CellType::START;
             } else if (ksymbl == SDLK_f) {
                 _brush_type = CellType::FINISH;
-            } else {
+            } else if (ksymbl == SDLK_w) {
                 _brush_type = CellType::WALL;
+            } else {
+                _brush_type = CellType::EMPTY;
             }
             return;
             break;
@@ -120,17 +128,27 @@ struct Map {
             y = event.motion.y;
             break;
         } 
-        if (_is_drawing) {
+        if (_is_drawing && _brush_type != EMPTY) {
+            LOG("at: {} {}", x, y);
             constexpr int size = 10;
             this->_draw_at(x, y, size);
             this->_write_at(x, y, size);
         }
-
     }
 } MAP;
 
+enum Direction {
+    None,
+    Left,
+    Right,
+};
+
 struct Player {
-    static constexpr uint VELOCITY = 3;
+    static constexpr float JUM_CAP = 5.f;
+    static constexpr float VEL_CAP = 2.f; //cap
+    static constexpr float ACCEL    = 0.3f;
+    static constexpr float DECCEL   = 0.9f;
+    static constexpr float GRAVITY  = 0.2f; 
     const struct {
         int WIDTH   = 4;
         int HEIGHT  = 6;
@@ -143,10 +161,12 @@ struct Player {
     // position
     int x = 0;
     int y = 0;
+    Direction direction = None;
+    bool has_jumped = false;
 
     // velocity
-    int vel_x = 0;
-    int vel_y = 0;
+    float vel_x = 0;
+    float vel_y = 0;
 
     void place(int x, int y, int dx, int dy) {
         this->x = x;
@@ -155,15 +175,72 @@ struct Player {
         this->vel_y = dy;
     }
 
+    bool is_on_ground = false;
+
     void move() {
-        x += vel_x;
-        if (x < 0 || x + SIZE.WIDTH > MAP.WIDTH) {
-            x -= vel_x;
+        if (direction == Left) {
+            vel_x -= ACCEL;
+            if (vel_x <= -VEL_CAP) {
+                vel_x = -VEL_CAP;
+            }
+        } else if (direction == Right) {
+            vel_x += ACCEL;
+            if (vel_x >= VEL_CAP) {
+                vel_x = VEL_CAP;
+            }
+        } else if (direction == None) {
+            if (vel_x > -0.05f && vel_x < 0.05f) {
+                vel_x = 0.f;
+            } else {
+                vel_x *= DECCEL;
+            }
         }
-        y += vel_y;
-        if (y < 0 || y + SIZE.HEIGHT > MAP.HEIGHT) {
-            y -= vel_y;
+
+        if (!is_on_ground) {
+            vel_y += GRAVITY;
         }
+
+        int prev_x = x;
+        int prev_y = y;
+
+        x += (vel_x + 0.5f);
+        y += (vel_y + 0.5f);
+
+        // BOUNDS CHECKING
+        if (x < 0) {
+            x = 0;
+            vel_x = -vel_x * DECCEL;
+        } else if ((x + SIZE.WIDTH) >= MAP.WIDTH) {
+            x = MAP.WIDTH - SIZE.WIDTH;
+            vel_x = -vel_x * DECCEL;
+        }
+        if (y < 0) {
+            y = 0;
+            vel_x = -vel_x - DECCEL;
+        } else if ((y + SIZE.HEIGHT) >= MAP.HEIGHT) {
+            y = MAP.HEIGHT - SIZE.HEIGHT;
+            vel_y = (0.25f) * -vel_y + GRAVITY;
+            is_on_ground = true;
+            has_jumped = false;
+        }
+
+        //LOG_DBG("x: {}, y: {}", x, y);
+        byte curr_cell = MAP.at(x, y);
+
+        // Collision with wall, move the player back
+        if (curr_cell == CellType::WALL) {
+            x = prev_x;
+            y = prev_y;
+            vel_x = -vel_x * DECCEL;
+            vel_y = -vel_y * DECCEL;
+            is_on_ground = true;
+            has_jumped = false;
+            //LOG_DBG("Collided with wall at [{}, {}]", x, y);
+        } else if (curr_cell != CellType::WALL) {
+            is_on_ground = false;
+        }
+        MAP._brush_type = CellType::START;
+        MAP._draw_at(x, y, 2);
     }
     // [TODO] add acceleration and get rid of those switches
     void handle_event(SDL_Event& event) {
@@ -171,32 +248,32 @@ struct Player {
             && event.key.repeat == 0) {
             switch (event.key.keysym.sym) {
             case SDLK_LEFT:
-                vel_x -= VELOCITY;
+                if (direction == Right) direction = None;
+                else                    direction = Left;
                 break;
             case SDLK_RIGHT:
-                vel_x += VELOCITY;
+                if (direction == Left)  direction = None;
+                else                    direction = Right;
                 break;
             case SDLK_UP:
-                vel_y -= VELOCITY;
-                break;
-            case SDLK_DOWN:
-                vel_y += VELOCITY;
+                if (!has_jumped)        vel_y -= JUM_CAP;
+                is_on_ground    = false;
+                has_jumped      = true;
                 break;
             }
         } else if (event.type == SDL_KEYUP 
                 && event.key.repeat == 0) {
             switch (event.key.keysym.sym) {
             case SDLK_LEFT:
-                vel_x += VELOCITY;
+                if (direction == Left)  direction = None;
+                else                    direction = Right;
                 break;
             case SDLK_RIGHT:
-                vel_x -= VELOCITY;
+                if (direction == Right) direction = None;
+                else                    direction = Left;
                 break;
             case SDLK_UP:
-                vel_y += VELOCITY;
-                break;
-            case SDLK_DOWN:
-                vel_y -= VELOCITY;
+                if (vel_y <= -VEL_CAP) vel_y += VEL_CAP;
                 break;
             }
         }
@@ -275,9 +352,9 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     GameState game_state = Initializing;
-    const char net_msk[16]    = "255.255.255.0";
-    const char bd_addr[16]    = "15.0.0.255";
-    char ip_addr[16]    = "15.0.0.";
+    const char net_msk[16]  = "255.255.255.0";
+    const char bd_addr[16]  = "15.0.0.255";
+    char ip_addr[16]        = "15.0.0.";
     strcat(ip_addr, argv[3]);
     const byte player_num = atoi(argv[3]);
 

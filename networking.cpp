@@ -29,8 +29,9 @@ static socklen_t sl = 0;
 
 static int epollfd = -1;
 
-static sockaddr_in broadcast_addr;
-static sockaddr_in this_addr;
+static sockaddr_in  broadcast_addr;
+static sockaddr_in  this_addr;
+static in_addr_t    local_addr;
 
 static NetConfig config;
 // network to hardware
@@ -231,6 +232,7 @@ bool setup_interface(int sock) {
         LOG_ERR("Failed to set interface IP address");
 		return false;
     }
+    local_addr = sock_addr.sin_addr.s_addr;
 
     // subnet mask
     memset(&sock_addr, 0, sizeof(sock_addr));
@@ -293,10 +295,11 @@ std::vector<Packet> poll() {
                     break;
                 }
             } // else receive the packet if its not from this address
-            if (s_addr.sin_addr.s_addr == this_addr.sin_addr.s_addr) continue;
+            if (s_addr.sin_addr.s_addr == local_addr) break;
             pkt = ntohpkt(pkt);
             packets.push_back(pkt);
             if (!player_addrs.contains(pkt.player_num) && pkt.opcode != Ack) {
+                LOG_DBG("Local addr: {}", local_addr);
                 LOG_DBG("Added player's: {} address: {} to the list of known players", 
                     pkt.player_num, s_addr.sin_addr.s_addr);
                 player_addrs.emplace(pkt.player_num, s_addr);

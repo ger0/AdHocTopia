@@ -18,8 +18,8 @@ enum Opcode: byte {
 
 union Data {
     struct {
-        i32 coord[2];
-        i32 d_vel[2];
+        i32     coord[2];
+        float   d_vel[2];
     } move;
 };
 

@@ -10,8 +10,10 @@
 #include <SDL2/SDL.h>
 
 #include "math.hpp"
+#include "Map.hpp"
 #include "types.hpp"
 #include "networking.hpp"
+#include "Player.hpp"
 
 constexpr uint PORT = 2113;
 constexpr uint MAP_PORT = 2114;
@@ -21,13 +23,6 @@ constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
 uint SEED = 0;
 
-enum CellType: byte {
-    EMPTY   = 0x00,
-    WALL    = 0xff,
-    START   = 0xf0,
-    FINISH  = 0x0f,
-};
-
 enum GameState {
     Initializing,
     Drawing,
@@ -36,360 +31,7 @@ enum GameState {
     Ending,
 };
 
-SDL_Colour get_cell_colour(CellType cell) {
-    switch (cell) {
-        case CellType::START:
-            return {0,255,0,255};
-        case CellType::FINISH:  
-            return {255,0,0,255};
-        case CellType::WALL:
-            return {100,100,100,255};
-        case CellType::EMPTY:
-            return {0,0,0,255};
-        default:
-            return {255,0,255,255};
-    }
-}
-
-struct Map {
-    static constexpr int WIDTH  = 800;
-    static constexpr int HEIGHT = 600;
-    static constexpr int SIZE   = WIDTH * HEIGHT;
-    std::array<byte, SIZE> data;
-
-    Map() {
-        data.fill(0);
-    }
-
-    SDL_Texture *_texture   = nullptr;
-    bool        _is_drawing = false;
-    CellType    _brush_type = CellType::EMPTY;
-
-    inline byte &at(const int x, const int y) {
-        return data.at(x + y * WIDTH);
-    }
-    inline byte at_bnd(const int x, const int y) const {
-        if (x <= 0 || x >= WIDTH - 1|| y <= 0 || y >= HEIGHT - 1) return CellType::WALL;
-        else return data.at(x + y * WIDTH);
-    }
-
-    void _write_at(const int x, const int y, const int size) {
-        for (int iy = y; iy < y + size; iy++) {
-            for (int ix = x; ix < x + size; ix++) {
-                if (ix >= WIDTH || ix < 0 || iy >= HEIGHT || iy < 0) continue;
-                this->at(ix, iy) = _brush_type;
-            }
-        }
-    }
-    void _draw_at(const int x, const int y, const int size) {
-        // Set the target texture
-        SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), _texture);
-
-        // Draw
-        SDL_Rect rect = {x, y, size, size};
-        SDL_Color col = get_cell_colour(_brush_type);
-        SDL_SetRenderDrawColor(
-            SDL_GetRenderer(SDL_GetWindowFromID(1)), col.r, col.g, col.g, col.a);
-        SDL_RenderFillRect(
-            SDL_GetRenderer(SDL_GetWindowFromID(1)), &rect);
-
-        // Reset the target to the default rendering target (the window)
-        SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), NULL);
-    }
-
-    Vector2D refl_vector(Vector2D const &vect, const float mx, const float my) {
-        const int x = mx + 0.5f;
-        const int y = my + 0.5f;
-        float x0 = ((Map*)this)->at_bnd(x-1, y-1) / 3.f
-                 + ((Map*)this)->at_bnd(x-1, y  ) / 3.f
-                 + ((Map*)this)->at_bnd(x-1, y+1) / 3.f;
-
-        float x1 = ((Map*)this)->at_bnd(x+1, y-1) / 3.f
-                 + ((Map*)this)->at_bnd(x+1, y  ) / 3.f
-                 + ((Map*)this)->at_bnd(x+1, y+1) / 3.f;
-
-        float y0 = ((Map*)this)->at_bnd(x-1, y+1) / 3.f
-                 + ((Map*)this)->at_bnd(x  , y+1) / 3.f
-                 + ((Map*)this)->at_bnd(x+1, y+1) / 3.f;
-
-        float y1 = ((Map*)this)->at_bnd(x-1, y-1) / 3.f
-                 + ((Map*)this)->at_bnd(x  , y-1) / 3.f
-                 + ((Map*)this)->at_bnd(x+1, y-1) / 3.f;
-
-        // gradient
-        Vector2D surf_grad = {x1 - x0, y1 - y0};
-        surf_grad.normalize();
-        Vector2D norm_vect = vect;
-        norm_vect.normalize();
-        
-        return reflect(norm_vect, surf_grad);
-    }
-
-    void handle_event(SDL_Event &event) {
-        int x, y;
-
-        const auto& ksymbl  = event.key.keysym.sym;
-        const auto& embttn  = event.button;
-
-        switch (event.type) {
-        case SDL_KEYDOWN:
-            if (ksymbl == SDLK_s) {
-                _brush_type = CellType::START;
-            } else if (ksymbl == SDLK_f) {
-                _brush_type = CellType::FINISH;
-            } else if (ksymbl == SDLK_w) {
-                _brush_type = CellType::WALL;
-            } else {
-                _brush_type = CellType::EMPTY;
-            }
-            return;
-            break;
-
-        case SDL_MOUSEBUTTONDOWN:
-            if (embttn.button != SDL_BUTTON_LEFT) break;
-            _is_drawing = true;
-            x = embttn.x;
-            y = embttn.y;
-            break;
-        case SDL_MOUSEBUTTONUP:
-            if (embttn.button != SDL_BUTTON_LEFT) break;
-            _is_drawing = false;
-            return;
-            break;
-        case SDL_MOUSEMOTION: 
-            x = event.motion.x;
-            y = event.motion.y;
-            break;
-        } 
-        if (_is_drawing && _brush_type != EMPTY) {
-            constexpr int size = 18;
-            this->_draw_at(x, y, size);
-            this->_write_at(x, y, size);
-        }
-    }
-} MAP;
-
-enum Direction {
-    None,
-    Left,
-    Right,
-};
-
-struct Player {
-    static constexpr float JUM_CAP  = 5.f;
-    static constexpr float VEL_CAP  = 2.f; //cap
-    static constexpr float ACCEL    = 0.3f;
-    static constexpr float DECCEL   = 0.85f;
-    static constexpr float GRAVITY  = 0.3f; 
-    const struct {
-        int WIDTH   = 8;
-        int HEIGHT  = 12;
-    } SIZE;
-
-    byte player_num;
-    bool should_predict; // should predict the movement
-    SDL_Colour colour;
-    
-    // position
-    struct {
-        int x = 10;
-        int y = 10;
-    } pos;
-    // velocity
-    Vector2D vel = Vector2D(0, 0);
-
-    Direction direction = None;
-
-    void place(int x, int y, int dx, int dy) {
-        this->pos.x = x;
-        this->pos.y = y;
-        this->vel.x = dx;
-        this->vel.y = dy;
-    }
-
-    //uint bounces = 0;
-    bool is_on_ground = false;
-    bool has_jumped = false;
-
-    bool unstuck_walls() {
-        for (int off = 0; off < SIZE.HEIGHT; ++off) {
-            if (MAP.at_bnd(pos.x, pos.y - off) == CellType::EMPTY) {
-                pos.y = pos.y - off;
-                return true;
-            }
-        }
-        return false;
-    }
-    void move_down() {
-        for (int off = 0; off > -SIZE.HEIGHT; --off) {
-            if (MAP.at_bnd(pos.x, pos.y - off) == CellType::EMPTY) {
-                pos.y = pos.y - off;
-                return;
-            }
-        }
-    }
-
-    // [TODO] Refactor this nightmare
-    void move_flight() {
-        vel.y += GRAVITY;
-    
-        int prev_x = pos.x;
-        int prev_y = pos.y;
-
-        int curr_x, curr_y;
-
-        // MESSY BOUNDARY CHECKING
-        Vector2D step_vel = vel;
-        step_vel.normalize();
-
-        // a partial dist
-        float step_x = prev_x;
-        float step_y = prev_y;
-
-        // max distance to the last possible point
-        Vector2D distance(
-            (pos.x + vel.x) - pos.x, (pos.y + vel.y) - pos.y
-        );
-        float distance_len = distance.length();
-
-        Vector2D distance_taken(0.f, 0.f);
-        float distance_remain = distance_len - 0.f;
-
-        // the cells
-        byte step_cell;
-        byte belw_cell;
-        do {
-            curr_x = (int)(step_x + 0.5f);
-            curr_y = (int)(step_y + 0.5f);
-
-            step_cell = MAP.at_bnd(curr_x, curr_y);
-            belw_cell = MAP.at_bnd(curr_x + 1, curr_y);
-            if ((step_cell != CellType::WALL && belw_cell == CellType::WALL)
-                || step_cell == CellType::WALL) {
-                //LOG_ERR("WALL!");
-                break;
-            }
-            step_x += step_vel.x;
-            step_y += step_vel.y;
-
-            distance_taken.x = step_x - pos.x;
-            distance_taken.y = step_y - pos.y;
-
-            distance_remain = distance_len - distance_taken.length();
-        } while (distance_remain > 0.f);
-
-        Vector2D refl_vector = MAP.refl_vector(vel, step_x, step_y);
-
-        pos.x = (int)(step_x + 0.5f);
-        pos.y = (int)(step_y + 0.5f);
-
-        // Collision with wall, move the player back
-        if (belw_cell == CellType::WALL || step_cell == CellType::WALL) {
-            vel.y = -refl_vector.y * DECCEL;
-            vel.x =  refl_vector.x;
-            pos.x = prev_x + vel.x + 0.5f;
-            pos.y = prev_y + vel.y + 0.5f;
-            has_jumped = false;
-        }
-    } 
-
-    void move() {
-        // is on ground?
-        byte curr_cell = MAP.at_bnd(pos.x, pos.y);
-        // if standing on a wall 
-        if (MAP.at_bnd(pos.x, pos.y + 1) == CellType::WALL 
-                && curr_cell != CellType::WALL
-                && !has_jumped) { //&& bounces >= abs(vel.y / 3)) {
-            //bounces = 0;
-            is_on_ground = true;
-        } 
-        // if in the air 
-        else {
-            is_on_ground = false;
-        }
-
-        // Handle movements:
-        switch (direction) {
-        case Left:
-            vel.x = vel.x <= -VEL_CAP ? -VEL_CAP : vel.x - ACCEL;
-            break;
-        case Right:
-            vel.x = vel.x >= VEL_CAP ? VEL_CAP : vel.x + ACCEL;
-            break;
-        case None:
-            if (vel.x > -0.01f && vel.x < 0.01f) {
-                vel.x = 0.f;
-            } else {
-                vel.x *= DECCEL;
-            }
-            break;
-        };
-        if (!is_on_ground) {
-            move_flight();
-            return;
-        }
-        has_jumped = false; 
-        // else is walking
-        bool success = true;
-        pos.x += vel.x + 0.5f; 
-        vel.y = 0.f;
-
-        curr_cell = MAP.at_bnd(pos.x, pos.y);
-        if (curr_cell == CellType::WALL) {
-            success = unstuck_walls();
-        } else {
-            move_down();
-        }
-        if (!success) {
-            vel.x = -vel.x * DECCEL;
-            pos.x += vel.x + 0.5f;
-        }
-    }
-
-    void handle_event(SDL_Event& event) {
-        if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
-            switch (event.key.keysym.sym) {
-            case SDLK_LEFT:
-                if (direction == Right) direction = None;
-                else                    direction = Left;
-                break;
-            case SDLK_RIGHT:
-                if (direction == Left)  direction = None;
-                else                    direction = Right;
-                break;
-            case SDLK_UP:
-                if (!has_jumped) {
-                    vel.y -= JUM_CAP;
-                    has_jumped = true;
-                }
-                break;
-            }
-        } else if (event.type == SDL_KEYUP && event.key.repeat == 0) {
-            switch (event.key.keysym.sym) {
-            case SDLK_LEFT:
-                if (direction == Left)  direction = None;
-                else                    direction = Right;
-                break;
-            case SDLK_RIGHT:
-                if (direction == Right) direction = None;
-                else                    direction = Left;
-                break;
-            }
-        }
-    }
-
-    void render(SDL_Renderer* renderer) const {
-        auto mid_w = SIZE.WIDTH  / 2;
-        auto mid_h = SIZE.HEIGHT / 2;
-        SDL_Rect rect = {pos.x - mid_w, pos.y - mid_h, mid_w, mid_h};
-        const auto& c = colour;
-        SDL_SetRenderDrawColor(renderer, 255, 75, 0, 255);
-        SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, 255);
-        SDL_RenderFillRect(renderer, &rect);
-    }
-};
-
-GameState poll_events(GameState state, SDL_Event &event, Player &player) {
+GameState poll_events(GameState state, Map &map, SDL_Event &event, Player &player) {
     while (SDL_PollEvent(&event) != 0) {
         if (event.type == SDL_QUIT) {
             return GameState::Ending;
@@ -398,7 +40,7 @@ GameState poll_events(GameState state, SDL_Event &event, Player &player) {
             player.handle_event(event);
         }
         else if (state == Drawing) {
-            MAP.handle_event(event);
+            map.handle_event(event);
         } 
         if (event.type == SDL_KEYDOWN 
             && event.key.keysym.sym == SDLK_SPACE) {
@@ -472,6 +114,7 @@ int main(int argc, char* argv[]) {
         perror("What"); 
         return EXIT_FAILURE;
     }
+    Map map;
 
     // -------------------------- sdl  init ---------------------------
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
@@ -479,7 +122,7 @@ int main(int argc, char* argv[]) {
         argv[0], 
         SDL_WINDOWPOS_UNDEFINED, 
         SDL_WINDOWPOS_UNDEFINED,
-        MAP.WIDTH, MAP.HEIGHT, SDL_WINDOW_SHOWN
+        Map::WIDTH, Map::HEIGHT, SDL_WINDOW_SHOWN
     );
     SDL_Renderer* renderer = SDL_CreateRenderer(
         window, 
@@ -490,9 +133,9 @@ int main(int argc, char* argv[]) {
         renderer,
         SDL_PIXELFORMAT_RGBA8888,
         SDL_TEXTUREACCESS_TARGET,
-        MAP.WIDTH, MAP.HEIGHT 
+        Map::WIDTH, Map::HEIGHT 
     );
-    MAP._texture = map_texture;
+    map._texture = map_texture;
 
     defer {SDL_DestroyTexture(map_texture);};
     defer {SDL_DestroyRenderer(renderer);};
@@ -529,16 +172,16 @@ int main(int argc, char* argv[]) {
 
     // [TODO] Refactor
     while (game_state != GameState::Ending) {
-        game_state = poll_events(game_state, event, player);
+        game_state = poll_events(game_state, map, event, player);
         game_state = poll_packets(game_state, enemies);
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, map_texture, NULL, NULL);
         if (game_state == Playing) {
-            player.move();
+            player.move(map);
             for (auto& [_, enemy]: enemies) {
-                if (enemy.should_predict) enemy.move();
+                if (enemy.should_predict) enemy.move(map);
                 else enemy.should_predict = true;
                 enemy.render(renderer);
             }

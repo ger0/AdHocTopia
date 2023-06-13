@@ -3,7 +3,7 @@ CFLAGS := -std=c++20 -Wall
 DEBUG_FLAG := -DDEBUG -g
 LIBS := -lfmt -lSDL2
 
-SRC_FILES := main.cpp networking.cpp math.cpp
+SRC_FILES := main.cpp networking.cpp math.cpp Player.cpp Map.cpp
 
 ifdef DEBUG
 CFLAGS += $(DEBUG_FLAG)

@@ -9,13 +9,14 @@
 
 #include <SDL2/SDL.h>
 
+#include "math.hpp"
 #include "types.hpp"
 #include "networking.hpp"
 
 constexpr uint PORT = 2113;
 constexpr uint MAP_PORT = 2114;
 
-constexpr double TICK_RATE      = 32;
+constexpr double TICK_RATE      = 1;
 constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
 uint SEED = 0;
@@ -67,6 +68,10 @@ struct Map {
     inline byte &at(const int x, const int y) {
         return data.at(x + y * WIDTH);
     }
+    inline byte at_bnd(const int x, const int y) const {
+        if (x <= 0 || x >= WIDTH - 1|| y <= 0 || y >= HEIGHT - 1) return CellType::WALL;
+        else return data.at(x + y * WIDTH);
+    }
 
     void _write_at(const int x, const int y, const int size) {
         for (int iy = y; iy < y + size; iy++) {
@@ -90,6 +95,34 @@ struct Map {
 
         // Reset the target to the default rendering target (the window)
         SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), NULL);
+    }
+
+    Vector2D refl_vector(Vector2D const &vect, const float mx, const float my) {
+        const int x = mx + 0.5f;
+        const int y = my + 0.5f;
+        float x0 = ((Map*)this)->at_bnd(x-1, y-1) / 3.f
+                 + ((Map*)this)->at_bnd(x-1, y  ) / 3.f
+                 + ((Map*)this)->at_bnd(x-1, y+1) / 3.f;
+
+        float x1 = ((Map*)this)->at_bnd(x+1, y-1) / 3.f
+                 + ((Map*)this)->at_bnd(x+1, y  ) / 3.f
+                 + ((Map*)this)->at_bnd(x+1, y+1) / 3.f;
+
+        float y0 = ((Map*)this)->at_bnd(x-1, y+1) / 3.f
+                 + ((Map*)this)->at_bnd(x  , y+1) / 3.f
+                 + ((Map*)this)->at_bnd(x+1, y+1) / 3.f;
+
+        float y1 = ((Map*)this)->at_bnd(x-1, y-1) / 3.f
+                 + ((Map*)this)->at_bnd(x  , y-1) / 3.f
+                 + ((Map*)this)->at_bnd(x+1, y-1) / 3.f;
+
+        // gradient
+        Vector2D surf_grad = {x1 - x0, y1 - y0};
+        surf_grad.normalize();
+        Vector2D norm_vect = vect;
+        norm_vect.normalize();
+        
+        return reflect(norm_vect, surf_grad);
     }
 
     void handle_event(SDL_Event &event) {
@@ -129,7 +162,6 @@ struct Map {
             break;
         } 
         if (_is_drawing && _brush_type != EMPTY) {
-            LOG("at: {} {}", x, y);
             constexpr int size = 10;
             this->_draw_at(x, y, size);
             this->_write_at(x, y, size);
@@ -147,8 +179,8 @@ struct Player {
     static constexpr float JUM_CAP = 5.f;
     static constexpr float VEL_CAP = 2.f; //cap
     static constexpr float ACCEL    = 0.3f;
-    static constexpr float DECCEL   = 0.9f;
-    static constexpr float GRAVITY  = 0.2f; 
+    static constexpr float DECCEL   = 0.75f;
+    static constexpr float GRAVITY  = 0.3f; 
     const struct {
         int WIDTH   = 4;
         int HEIGHT  = 6;
@@ -159,8 +191,8 @@ struct Player {
     SDL_Colour colour;
     
     // position
-    int x = 0;
-    int y = 0;
+    int x = 10;
+    int y = 10;
     Direction direction = None;
     bool has_jumped = false;
 
@@ -177,9 +209,100 @@ struct Player {
 
     bool is_on_ground = false;
 
+    bool unstuck_walls() {
+        for (int off = 0; off < SIZE.HEIGHT; ++off) {
+            if (MAP.at_bnd(x, y - off) == CellType::EMPTY) {
+                y = y - off;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void move_flight() {
+        vel_y += GRAVITY;
+        int prev_x = x;
+        int prev_y = y;
+        // MESSY BOUNDARY CHECKING
+        Vector2D velocity(vel_x, vel_y);
+        Vector2D step_vel = velocity;
+        step_vel.normalize();
+
+        // a partial dist
+        float step_x = x;
+        float step_y = y;
+
+        // max distance to the last possible point
+        Vector2D distance((x + vel_x) - x, (y + vel_y) - y);
+        float distance_len = distance.length();
+
+        Vector2D distance_taken(0.f, 0.f);
+        float distance_remain = distance_len - 0.f;
+
+        // the cell
+        byte step_cell;
+        do {
+            prev_x = (int)(step_x + 0.5f);
+            prev_y = (int)(step_y + 0.5f);
+
+            step_cell = MAP.at_bnd(prev_x, prev_y);
+            if (step_cell == CellType::WALL) {
+                //LOG_ERR("WALL!");
+                break;
+            }
+            step_x += step_vel.x;
+            step_y += step_vel.y;
+
+            distance_taken.x = step_x - x;
+            distance_taken.y = step_y - y;
+
+            distance_remain = distance_len - distance_taken.length();
+
+            /* if (player_num == 1) {
+                LOG_DBG("POS: [{} {}] [{} {}] REMAINING: {}", prev_x, prev_y, step_x, step_y, distance_remain);
+            } */
+        } while (distance_remain > 0.f);
+        // [TODO] MIGHT CAUSE BIG ERRORS -- FIX!
+
+        Vector2D refl_vector = MAP.refl_vector(velocity, step_x, step_y);
+
+        x = (int)(step_x + 0.5f);
+        y = (int)(step_y + 0.5f);
+
+        // Collision with wall, move the player back
+        if (step_cell == CellType::WALL) {
+            if (player_num == 1) {
+                //LOG_DBG("Collided with wall at [{}, {}]", x, y);
+                //LOG_DBG("PreVel [{} {}], After [{} {}]", vel_x, vel_y, refl_vector.x, refl_vector.y);
+            }
+
+            if (vel_y > 0.f) {
+                has_jumped = false;
+            }
+            vel_y = -refl_vector.y * DECCEL;
+            vel_x =  refl_vector.x;
+
+            x = prev_x + vel_x + 0.5f;
+            y = prev_y + vel_y + 0.5f;
+        }
+    } 
+
     void move() {
+        // is on ground?
+        byte curr_cell = MAP.at_bnd(x, y);
+        if (MAP.at_bnd(x, y + 1) == CellType::WALL 
+            && curr_cell != CellType::WALL
+            && !has_jumped) 
+        {
+            is_on_ground = true;
+        } else if (curr_cell == CellType::WALL) {
+            unstuck_walls();
+        } else {
+            is_on_ground = false;
+        }
         if (direction == Left) {
             vel_x -= ACCEL;
+            //vel_x = vel_x <= -VEL_CAP ? -VEL_CAP : vel_x - ACCEL;
             if (vel_x <= -VEL_CAP) {
                 vel_x = -VEL_CAP;
             }
@@ -195,86 +318,51 @@ struct Player {
                 vel_x *= DECCEL;
             }
         }
-
         if (!is_on_ground) {
-            vel_y += GRAVITY;
+            move_flight();
+            return;
         }
-
-        int prev_x = x;
-        int prev_y = y;
-
-        x += (vel_x + 0.5f);
-        y += (vel_y + 0.5f);
-
-        // BOUNDS CHECKING
-        if (x < 0) {
-            x = 0;
+        // else
+        bool success = true;
+        x += vel_x + 0.5f; 
+        vel_y = 0.f;
+        if (MAP.at_bnd(x, y) == CellType::WALL) {
+            success = unstuck_walls();
+        }
+        if (!success) {
             vel_x = -vel_x * DECCEL;
-        } else if ((x + SIZE.WIDTH) >= MAP.WIDTH) {
-            x = MAP.WIDTH - SIZE.WIDTH;
-            vel_x = -vel_x * DECCEL;
+            x -= vel_x + 0.5f;
         }
-        if (y < 0) {
-            y = 0;
-            vel_x = -vel_x - DECCEL;
-        } else if ((y + SIZE.HEIGHT) >= MAP.HEIGHT) {
-            y = MAP.HEIGHT - SIZE.HEIGHT;
-            vel_y = (0.25f) * -vel_y + GRAVITY;
-            is_on_ground = true;
-            has_jumped = false;
-        }
-
-        //LOG_DBG("x: {}, y: {}", x, y);
-        byte curr_cell = MAP.at(x, y);
-
-        // Collision with wall, move the player back
-        if (curr_cell == CellType::WALL) {
-            x = prev_x;
-            y = prev_y;
-            vel_x = -vel_x * DECCEL;
-            vel_y = -vel_y * DECCEL;
-            is_on_ground = true;
-            has_jumped = false;
-            //LOG_DBG("Collided with wall at [{}, {}]", x, y);
-        } else if (curr_cell != CellType::WALL) {
-            is_on_ground = false;
-        }
-        MAP._brush_type = CellType::START;
-        MAP._draw_at(x, y, 2);
+        //MAP._brush_type = CellType::START;
+        //MAP._draw_at(x, y, 2);
     }
-    // [TODO] add acceleration and get rid of those switches
+
     void handle_event(SDL_Event& event) {
-        if (event.type == SDL_KEYDOWN 
-            && event.key.repeat == 0) {
+        if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
             switch (event.key.keysym.sym) {
-            case SDLK_LEFT:
-                if (direction == Right) direction = None;
-                else                    direction = Left;
-                break;
-            case SDLK_RIGHT:
-                if (direction == Left)  direction = None;
-                else                    direction = Right;
-                break;
-            case SDLK_UP:
-                if (!has_jumped)        vel_y -= JUM_CAP;
-                is_on_ground    = false;
-                has_jumped      = true;
-                break;
+                case SDLK_LEFT:
+                    if (direction == Right) direction = None;
+                    else                    direction = Left;
+                    break;
+                case SDLK_RIGHT:
+                    if (direction == Left)  direction = None;
+                    else                    direction = Right;
+                    break;
+                case SDLK_UP:
+                    vel_y -= JUM_CAP;
+                    has_jumped = true;
+                    break;
             }
-        } else if (event.type == SDL_KEYUP 
-                && event.key.repeat == 0) {
+        } else if (event.type == SDL_KEYUP && event.key.repeat == 0) {
             switch (event.key.keysym.sym) {
-            case SDLK_LEFT:
-                if (direction == Left)  direction = None;
-                else                    direction = Right;
-                break;
-            case SDLK_RIGHT:
-                if (direction == Right) direction = None;
-                else                    direction = Left;
-                break;
-            case SDLK_UP:
-                if (vel_y <= -VEL_CAP) vel_y += VEL_CAP;
-                break;
+                case SDLK_LEFT:
+                    if (direction == Left)  direction = None;
+                    else                    direction = Right;
+                    break;
+                case SDLK_RIGHT:
+                    if (direction == Right) direction = None;
+                    else                    direction = Left;
+                    break;
             }
         }
     }
@@ -470,8 +558,8 @@ int main(int argc, char* argv[]) {
         delta_frame = curr_tick - prev_frame;
         if (delta_frame < frame_min_dur) {
             SDL_Delay(uint(frame_min_dur - delta_frame));
-            prev_frame = curr_tick;
         }
+        prev_frame = curr_tick;
     }
     return EXIT_SUCCESS;
 }

@@ -16,7 +16,7 @@
 constexpr uint PORT = 2113;
 constexpr uint MAP_PORT = 2114;
 
-constexpr double TICK_RATE      = 1;
+constexpr double TICK_RATE      = 32;
 constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
 uint SEED = 0;
@@ -162,7 +162,7 @@ struct Map {
             break;
         } 
         if (_is_drawing && _brush_type != EMPTY) {
-            constexpr int size = 10;
+            constexpr int size = 18;
             this->_draw_at(x, y, size);
             this->_write_at(x, y, size);
         }
@@ -176,14 +176,14 @@ enum Direction {
 };
 
 struct Player {
-    static constexpr float JUM_CAP = 5.f;
-    static constexpr float VEL_CAP = 2.f; //cap
+    static constexpr float JUM_CAP  = 5.f;
+    static constexpr float VEL_CAP  = 2.f; //cap
     static constexpr float ACCEL    = 0.3f;
-    static constexpr float DECCEL   = 0.75f;
+    static constexpr float DECCEL   = 0.85f;
     static constexpr float GRAVITY  = 0.3f; 
     const struct {
-        int WIDTH   = 4;
-        int HEIGHT  = 6;
+        int WIDTH   = 8;
+        int HEIGHT  = 12;
     } SIZE;
 
     byte player_num;
@@ -191,49 +191,65 @@ struct Player {
     SDL_Colour colour;
     
     // position
-    int x = 10;
-    int y = 10;
-    Direction direction = None;
-    bool has_jumped = false;
-
+    struct {
+        int x = 10;
+        int y = 10;
+    } pos;
     // velocity
-    float vel_x = 0;
-    float vel_y = 0;
+    Vector2D vel = Vector2D(0, 0);
+
+    Direction direction = None;
 
     void place(int x, int y, int dx, int dy) {
-        this->x = x;
-        this->y = y;
-        this->vel_x = dx;
-        this->vel_y = dy;
+        this->pos.x = x;
+        this->pos.y = y;
+        this->vel.x = dx;
+        this->vel.y = dy;
     }
 
+    //uint bounces = 0;
     bool is_on_ground = false;
+    bool has_jumped = false;
 
     bool unstuck_walls() {
         for (int off = 0; off < SIZE.HEIGHT; ++off) {
-            if (MAP.at_bnd(x, y - off) == CellType::EMPTY) {
-                y = y - off;
+            if (MAP.at_bnd(pos.x, pos.y - off) == CellType::EMPTY) {
+                pos.y = pos.y - off;
                 return true;
             }
         }
         return false;
     }
+    void move_down() {
+        for (int off = 0; off > -SIZE.HEIGHT; --off) {
+            if (MAP.at_bnd(pos.x, pos.y - off) == CellType::EMPTY) {
+                pos.y = pos.y - off;
+                return;
+            }
+        }
+    }
 
+    // [TODO] Refactor this nightmare
     void move_flight() {
-        vel_y += GRAVITY;
-        int prev_x = x;
-        int prev_y = y;
+        vel.y += GRAVITY;
+    
+        int prev_x = pos.x;
+        int prev_y = pos.y;
+
+        int curr_x, curr_y;
+
         // MESSY BOUNDARY CHECKING
-        Vector2D velocity(vel_x, vel_y);
-        Vector2D step_vel = velocity;
+        Vector2D step_vel = vel;
         step_vel.normalize();
 
         // a partial dist
-        float step_x = x;
-        float step_y = y;
+        float step_x = prev_x;
+        float step_y = prev_y;
 
         // max distance to the last possible point
-        Vector2D distance((x + vel_x) - x, (y + vel_y) - y);
+        Vector2D distance(
+            (pos.x + vel.x) - pos.x, (pos.y + vel.y) - pos.y
+        );
         float distance_len = distance.length();
 
         Vector2D distance_taken(0.f, 0.f);
@@ -242,10 +258,10 @@ struct Player {
         // the cell
         byte step_cell;
         do {
-            prev_x = (int)(step_x + 0.5f);
-            prev_y = (int)(step_y + 0.5f);
+            curr_x = (int)(step_x + 0.5f);
+            curr_y = (int)(step_y + 0.5f);
 
-            step_cell = MAP.at_bnd(prev_x, prev_y);
+            step_cell = MAP.at_bnd(curr_x, curr_y);
             if (step_cell == CellType::WALL) {
                 //LOG_ERR("WALL!");
                 break;
@@ -253,122 +269,123 @@ struct Player {
             step_x += step_vel.x;
             step_y += step_vel.y;
 
-            distance_taken.x = step_x - x;
-            distance_taken.y = step_y - y;
+            distance_taken.x = step_x - pos.x;
+            distance_taken.y = step_y - pos.y;
 
             distance_remain = distance_len - distance_taken.length();
-
-            /* if (player_num == 1) {
-                LOG_DBG("POS: [{} {}] [{} {}] REMAINING: {}", prev_x, prev_y, step_x, step_y, distance_remain);
-            } */
         } while (distance_remain > 0.f);
-        // [TODO] MIGHT CAUSE BIG ERRORS -- FIX!
 
-        Vector2D refl_vector = MAP.refl_vector(velocity, step_x, step_y);
+        Vector2D refl_vector = MAP.refl_vector(vel, step_x, step_y);
 
-        x = (int)(step_x + 0.5f);
-        y = (int)(step_y + 0.5f);
+        pos.x = (int)(step_x + 0.5f);
+        pos.y = (int)(step_y + 0.5f);
 
         // Collision with wall, move the player back
         if (step_cell == CellType::WALL) {
-            if (player_num == 1) {
-                //LOG_DBG("Collided with wall at [{}, {}]", x, y);
-                //LOG_DBG("PreVel [{} {}], After [{} {}]", vel_x, vel_y, refl_vector.x, refl_vector.y);
-            }
-
-            if (vel_y > 0.f) {
+            if (vel.y > 0.f) {
+                unstuck_walls(); // todo
                 has_jumped = false;
+                //++bounces;
+            } //else bounces = 0;
+            // [TODO] fix
+            else {
+                pos.x = prev_x + vel.x + 0.5f;
+                pos.y = prev_y + vel.y + 0.5f;
             }
-            vel_y = -refl_vector.y * DECCEL;
-            vel_x =  refl_vector.x;
-
-            x = prev_x + vel_x + 0.5f;
-            y = prev_y + vel_y + 0.5f;
+            vel.y = -refl_vector.y * DECCEL;
+            vel.x =  refl_vector.x;
         }
     } 
 
     void move() {
         // is on ground?
-        byte curr_cell = MAP.at_bnd(x, y);
-        if (MAP.at_bnd(x, y + 1) == CellType::WALL 
-            && curr_cell != CellType::WALL
-            && !has_jumped) 
-        {
+        byte curr_cell = MAP.at_bnd(pos.x, pos.y);
+        // if standing on a wall 
+        if (MAP.at_bnd(pos.x, pos.y + 1) == CellType::WALL 
+                && curr_cell != CellType::WALL
+                && !has_jumped) { //&& bounces >= abs(vel.y / 3)) {
+            //bounces = 0;
             is_on_ground = true;
-        } else if (curr_cell == CellType::WALL) {
-            unstuck_walls();
-        } else {
+        } 
+        // if in the air 
+        else {
             is_on_ground = false;
         }
-        if (direction == Left) {
-            vel_x -= ACCEL;
-            //vel_x = vel_x <= -VEL_CAP ? -VEL_CAP : vel_x - ACCEL;
-            if (vel_x <= -VEL_CAP) {
-                vel_x = -VEL_CAP;
-            }
-        } else if (direction == Right) {
-            vel_x += ACCEL;
-            if (vel_x >= VEL_CAP) {
-                vel_x = VEL_CAP;
-            }
-        } else if (direction == None) {
-            if (vel_x > -0.05f && vel_x < 0.05f) {
-                vel_x = 0.f;
+
+        // Handle movements:
+        switch (direction) {
+        case Left:
+            vel.x = vel.x <= -VEL_CAP ? -VEL_CAP : vel.x - ACCEL;
+            break;
+        case Right:
+            vel.x = vel.x >= VEL_CAP ? VEL_CAP : vel.x + ACCEL;
+            break;
+        case None:
+            if (vel.x > -0.01f && vel.x < 0.01f) {
+                vel.x = 0.f;
             } else {
-                vel_x *= DECCEL;
+                vel.x *= DECCEL;
             }
-        }
+            break;
+        };
         if (!is_on_ground) {
             move_flight();
             return;
         }
-        // else
+        has_jumped = false; 
+        // else is walking
         bool success = true;
-        x += vel_x + 0.5f; 
-        vel_y = 0.f;
-        if (MAP.at_bnd(x, y) == CellType::WALL) {
+        pos.x += vel.x + 0.5f; 
+        vel.y = 0.f;
+
+        curr_cell = MAP.at_bnd(pos.x, pos.y);
+        if (curr_cell == CellType::WALL) {
             success = unstuck_walls();
+        } else {
+            move_down();
         }
         if (!success) {
-            vel_x = -vel_x * DECCEL;
-            x -= vel_x + 0.5f;
+            vel.x = -vel.x * DECCEL;
+            pos.x += vel.x + 0.5f;
         }
-        //MAP._brush_type = CellType::START;
-        //MAP._draw_at(x, y, 2);
     }
 
     void handle_event(SDL_Event& event) {
         if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
             switch (event.key.keysym.sym) {
-                case SDLK_LEFT:
-                    if (direction == Right) direction = None;
-                    else                    direction = Left;
-                    break;
-                case SDLK_RIGHT:
-                    if (direction == Left)  direction = None;
-                    else                    direction = Right;
-                    break;
-                case SDLK_UP:
-                    vel_y -= JUM_CAP;
+            case SDLK_LEFT:
+                if (direction == Right) direction = None;
+                else                    direction = Left;
+                break;
+            case SDLK_RIGHT:
+                if (direction == Left)  direction = None;
+                else                    direction = Right;
+                break;
+            case SDLK_UP:
+                if (!has_jumped) {
+                    vel.y -= JUM_CAP;
                     has_jumped = true;
-                    break;
+                }
+                break;
             }
         } else if (event.type == SDL_KEYUP && event.key.repeat == 0) {
             switch (event.key.keysym.sym) {
-                case SDLK_LEFT:
-                    if (direction == Left)  direction = None;
-                    else                    direction = Right;
-                    break;
-                case SDLK_RIGHT:
-                    if (direction == Right) direction = None;
-                    else                    direction = Left;
-                    break;
+            case SDLK_LEFT:
+                if (direction == Left)  direction = None;
+                else                    direction = Right;
+                break;
+            case SDLK_RIGHT:
+                if (direction == Right) direction = None;
+                else                    direction = Left;
+                break;
             }
         }
     }
 
     void render(SDL_Renderer* renderer) const {
-        SDL_Rect rect = { x, y, SIZE.WIDTH, SIZE.HEIGHT };
+        auto mid_w = SIZE.WIDTH  / 2;
+        auto mid_h = SIZE.HEIGHT / 2;
+        SDL_Rect rect = {pos.x - mid_w, pos.y - mid_h, mid_w, mid_h};
         const auto& c = colour;
         SDL_SetRenderDrawColor(renderer, 255, 75, 0, 255);
         SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, 255);
@@ -538,8 +555,8 @@ int main(int argc, char* argv[]) {
             .opcode     = networking::Opcode::Coord,
             .player_num = player_num,
             .seq        = 0,
-            .payload    = {player.x, player.y, 
-                player.vel_x, player.vel_y},
+            .payload    = {player.pos.x, player.pos.y, 
+                player.vel.x, player.vel.y},
         };
 
         curr_tick = SDL_GetTicks64();

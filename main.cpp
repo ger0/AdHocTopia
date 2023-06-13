@@ -255,14 +255,17 @@ struct Player {
         Vector2D distance_taken(0.f, 0.f);
         float distance_remain = distance_len - 0.f;
 
-        // the cell
+        // the cells
         byte step_cell;
+        byte belw_cell;
         do {
             curr_x = (int)(step_x + 0.5f);
             curr_y = (int)(step_y + 0.5f);
 
             step_cell = MAP.at_bnd(curr_x, curr_y);
-            if (step_cell == CellType::WALL) {
+            belw_cell = MAP.at_bnd(curr_x + 1, curr_y);
+            if ((step_cell != CellType::WALL && belw_cell == CellType::WALL)
+                || step_cell == CellType::WALL) {
                 //LOG_ERR("WALL!");
                 break;
             }
@@ -281,19 +284,12 @@ struct Player {
         pos.y = (int)(step_y + 0.5f);
 
         // Collision with wall, move the player back
-        if (step_cell == CellType::WALL) {
-            if (vel.y > 0.f) {
-                unstuck_walls(); // todo
-                has_jumped = false;
-                //++bounces;
-            } //else bounces = 0;
-            // [TODO] fix
-            else {
-                pos.x = prev_x + vel.x + 0.5f;
-                pos.y = prev_y + vel.y + 0.5f;
-            }
+        if (belw_cell == CellType::WALL || step_cell == CellType::WALL) {
             vel.y = -refl_vector.y * DECCEL;
             vel.x =  refl_vector.x;
+            pos.x = prev_x + vel.x + 0.5f;
+            pos.y = prev_y + vel.y + 0.5f;
+            has_jumped = false;
         }
     } 
 

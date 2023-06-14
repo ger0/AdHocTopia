@@ -30,7 +30,7 @@ static std::unordered_map<byte, sockaddr_in>   player_addrs;
  * [for bitmap transmission]                        */
 static std::unordered_map<in_addr_t, int>      tcp_socks;
 
-/* sockaddr.in_addr_t   -> what part of the         *
+/* socket filedescriptor-> what part of the         *
  * bitmap has been sent so far                      */
 static std::unordered_map<in_addr_t, size_t>   bitmap_bytes_sent; 
 
@@ -286,8 +286,13 @@ bool setup(NetConfig &cfg) {
 }
 
 void destroy() {
-    if (udp_sfd >= 0)        close(udp_sfd);
+    LOG_DBG("Cleaning up networking resources...");
+    if (udp_sfd >= 0)    close(udp_sfd);
+    if (tcp_sfd >= 0)    close(tcp_sfd);
     if (epollfd >= 0)    close(epollfd);
+    for (auto& [_, sock]: tcp_socks) {
+        close(sock);
+    }
 }
 
 // setup adhoc mode and essid
@@ -451,7 +456,8 @@ void accept_tcp_conns(std::vector<Packet> &packets) {
     epoll_event event;
     event.events = EPOLLOUT;
     event.data.fd = c_sfd;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, c_sfd, &event) == -1) {
+    // double-check later on
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_sfd, &event) == -1) {
         LOG_ERR("Failed to add client TCP socket to epoll.");
         perror("What");
         return;
@@ -462,8 +468,10 @@ void accept_tcp_conns(std::vector<Packet> &packets) {
     bitmap_bytes_sent[caddr] = 0;
 }
 
-void write_tcp_buffer() {
-
+void write_tcp_buffer(int fd) {
+    // how many bytes were written so far?
+    auto &read_count = bitmap_bytes_sent[fd];
+    int read_reamin = tcp_buffer_size - read_count;
 }
 
 // uses a newly generated fd by epoll
@@ -506,8 +514,13 @@ std::vector<Packet> poll() {
     std::vector<Packet> packets;
     int num_events = epoll_wait(epollfd, events, MAX_EVENTS, 24);
     if (num_events == -1) {
-        LOG_ERR("Epoll_wait failed");
-        perror("What"); 
+        if (EINTR) {
+            LOG_DBG("Epoll skipping, program interrupted");
+        } else {
+            LOG_ERR("PANIC: Epoll wait failed");
+            perror("What"); 
+            exit(EXIT_FAILURE);
+        }
         return packets;
     }
     for (int i = 0; i < num_events; ++i) {

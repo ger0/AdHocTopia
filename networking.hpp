@@ -53,6 +53,7 @@ bool setup(NetConfig &config);
 void destroy();
 void broadcast(Packet &pkt);
 void ack_to_player(byte num_to, byte num_from);
+bool set_tcp_buffer(byte* byte_ptr, size_t size);
 // connects to player and sets a buffer to requested size
 bool connect_to_player(byte player_num, uint byte_count);
 bool start_tcp_listening();

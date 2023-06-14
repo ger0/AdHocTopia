@@ -381,6 +381,13 @@ void ack_to_player(byte player_num, byte from_num) {
         LOG_ERR("Not enough bytes sent!!! {}", rv);
     }
 }
+//tes
+
+bool set_tcp_buffer(byte* byte_ptr, size_t size) {
+    tcp_buffer_pointer = size;
+    tcp_buffer = std::vector<byte>(size);
+    return true;
+}
 
 void recv_udp_packets(std::vector<Packet> &packets) {
     sockaddr_in s_addr;
@@ -470,8 +477,37 @@ void accept_tcp_conns(std::vector<Packet> &packets) {
 
 void write_tcp_buffer(int fd) {
     // how many bytes were written so far?
-    auto &read_count = bitmap_bytes_sent[fd];
-    int read_reamin = tcp_buffer_size - read_count;
+    auto &write_point = bitmap_bytes_sent[fd];
+    int write_remain = tcp_buffer_size - write_point;
+    void *buff = tcp_buffer.data() + write_point;
+
+    while (write_remain > 0) {
+        int rc = send(fd, buff, write_remain, 0);
+        if (rc > 0) {
+            write_point += rc;
+            write_remain -= rc;
+            LOG_DBG("Sent {} bytes, remaining {} on TCP stream", rc, write_remain);
+
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                LOG_DBG("Waiting for sending on TCP stream...");
+                break;
+            }
+        } else if (rc == 0) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                LOG_DBG("Waiting for sending on TCP stream...");
+                break;
+            } else {
+                LOG_ERR("Error in Sending TCP");
+                perror("What");
+            }
+            return;
+            // send failure msg to main prog and handle th 
+        } else if (rc == -1) {
+            LOG_ERR("Error in the TCP Connection...");
+            perror("What");
+            return;
+        }
+    }
 }
 
 // uses a newly generated fd by epoll

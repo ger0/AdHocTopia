@@ -54,7 +54,7 @@ GameState poll_events(GameState state, Map &map, SDL_Event &event, Player &playe
     return state;
 }
 
-GameState poll_packets(GameState state, std::unordered_map<byte, Player> &enemies) {
+GameState poll_packets(GameState state, Map &map, std::unordered_map<byte, Player> &enemies) {
     auto packets = networking::poll();
 
     // [TODO]: Refactor
@@ -91,6 +91,7 @@ GameState poll_packets(GameState state, std::unordered_map<byte, Player> &enemie
                 uint buff_size = pkt.payload.map_buff_size;
                 networking::connect_to_player(pkt.player_num, buff_size);
             } else {
+                networking::set_tcp_buffer(map.data.data(), Map::SIZE);
                 networking::start_tcp_listening();
             }
             state = Streaming;
@@ -185,7 +186,7 @@ int main(int argc, char* argv[]) {
     // [TODO] Refactor
     while (game_state != GameState::Ending) {
         game_state = poll_events(game_state, map, event, player);
-        game_state = poll_packets(game_state, enemies);
+        game_state = poll_packets(game_state, map, enemies);
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);

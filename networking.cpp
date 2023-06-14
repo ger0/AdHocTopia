@@ -23,17 +23,24 @@ bool setup_interface(int sock);
 constexpr uint SIZE_PKT = sizeof(Packet);
 constexpr uint MAX_BUFF_SIZE = 1024;
 
+struct Addr_entry {
+    byte player_num;
+
+    int tcp_sock = -1;
+    uint tcp_bytes_sent = 0;
+
+};
+
 /* player_num           -> player_sockaddr_in       */
-static std::unordered_map<byte, sockaddr_in>   player_addrs;
+static std::unordered_map<byte, sockaddr_in>    player_addrs;
 
 /* sockaddr.in_addr_t   -> player_tcp_sfd           *
  * [for bitmap transmission]                        */
-static std::unordered_map<in_addr_t, int>      tcp_socks;
+static std::unordered_map<int, in_addr_t>       tcp_socks_to_addr;
 
 /* socket filedescriptor-> what part of the         *
  * bitmap has been sent so far                      */
-static std::unordered_map<in_addr_t, size_t>   bitmap_bytes_sent; 
-
+static std::unordered_map<int, size_t>          tcp_bytes_sent; 
 
 static constexpr uint MAX_EVENTS = 8;
 static epoll_event ev, events[MAX_EVENTS];
@@ -102,12 +109,16 @@ bool connect_to_player(byte player_num, uint byte_count) {
         LOG_ERR("FATAL: CANNOT CONNECT TO NONEXISTING PLAYER!!!");
         return false;
     }
+    if (is_tcp_reading) {
+        LOG_DBG("Cannot connect twice to the same TCP sender");
+        return false;
+    }
     // retr addr from recvd UDP packets 
     auto addr = player_addrs[player_num];
     // the rest of the addr is identical
     addr.sin_port = htons(config.port - 1);
 
-    ev.events = EPOLLIN;
+    ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = tcp_sfd;
 
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_sfd, &ev) == -1) {
@@ -127,6 +138,7 @@ bool connect_to_player(byte player_num, uint byte_count) {
     }
     is_tcp_reading = true;
     tcp_buffer_size = byte_count;
+    LOG_DBG("Connected, bytes to read from TCP sender: {}.", byte_count);
     tcp_buffer = std::vector<byte>(byte_count);
     return true; 
 }
@@ -221,7 +233,7 @@ bool create_epoll() {
     } */
 
     // ADDING UDP SOCKET TO EPOLL
-    ev.events = EPOLLIN;
+    ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = udp_sfd;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, udp_sfd, &ev) == -1) {
         LOG_ERR("Epoll_ctl failed when adding UDP sock");
@@ -290,7 +302,7 @@ void destroy() {
     if (udp_sfd >= 0)    close(udp_sfd);
     if (tcp_sfd >= 0)    close(tcp_sfd);
     if (epollfd >= 0)    close(epollfd);
-    for (auto& [_, sock]: tcp_socks) {
+    for (auto& [sock, _]: tcp_socks_to_addr) {
         close(sock);
     }
 }
@@ -368,11 +380,13 @@ bool setup_interface(int sock) {
     return true;
 }
 
-void ack_to_player(byte player_num, byte from_num) {
+void ack_to_player(byte player_num, byte from_num, uint buff_size) {
     Packet pkt;
     pkt.opcode = Opcode::Ack;
     pkt.player_num  = from_num;
     pkt.dest_num    = player_num;
+    pkt.payload.map_buff_size = buff_size;
+
     pkt = htonpkt(pkt);
 
     const auto& s_addr = player_addrs[player_num];
@@ -384,7 +398,7 @@ void ack_to_player(byte player_num, byte from_num) {
 //tes
 
 bool set_tcp_buffer(byte* byte_ptr, size_t size) {
-    tcp_buffer_pointer = size;
+    tcp_buffer_size = size;
     tcp_buffer = std::vector<byte>(size);
     return true;
 }
@@ -437,7 +451,7 @@ bool start_tcp_listening() {
     }
 
     // ADDING TCP SOCKET TO EPOLL
-    ev.events = EPOLLIN;
+    ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = tcp_sfd;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_sfd, &ev) == -1) {
         LOG_ERR("Epoll_ctl failed when adding TCP sock");
@@ -449,7 +463,7 @@ bool start_tcp_listening() {
     return true;
 }
 
-void accept_tcp_conns(std::vector<Packet> &packets) {
+void accept_tcp_conns() {
     sockaddr_in cs_addr;
     socklen_t c_slen = sizeof(cs_addr);
     int c_sfd = accept(tcp_sfd, (sockaddr *)&cs_addr, &c_slen);
@@ -461,25 +475,27 @@ void accept_tcp_conns(std::vector<Packet> &packets) {
 
     // Add client socket to epoll
     epoll_event event;
-    event.events = EPOLLOUT;
+    event.events = EPOLLOUT | EPOLLET;
     event.data.fd = c_sfd;
     // double-check later on
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_sfd, &event) == -1) {
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, c_sfd, &event) == -1) {
         LOG_ERR("Failed to add client TCP socket to epoll.");
         perror("What");
         return;
     }
-    LOG_DBG("New TCP client connected.");
-    in_addr_t caddr;
-    tcp_socks[caddr] = c_sfd;
-    bitmap_bytes_sent[caddr] = 0;
+    LOG_DBG("New TCP client connected. fd: [{}]", c_sfd);
+    in_addr_t caddr = cs_addr.sin_addr.s_addr;
+    tcp_socks_to_addr[c_sfd] = caddr;
+    tcp_bytes_sent[c_sfd] = 0;
 }
 
-void write_tcp_buffer(int fd) {
+bool write_tcp_buffer(int fd) {
+    LOG_DBG("Trying to send on TCP stream... fd: {}", fd);
     // how many bytes were written so far?
-    auto &write_point = bitmap_bytes_sent[fd];
+    auto &write_point = tcp_bytes_sent.at(fd);
     int write_remain = tcp_buffer_size - write_point;
     void *buff = tcp_buffer.data() + write_point;
+    LOG_DBG("remaining bytes to send {}", write_remain);
 
     while (write_remain > 0) {
         int rc = send(fd, buff, write_remain, 0);
@@ -500,22 +516,25 @@ void write_tcp_buffer(int fd) {
                 LOG_ERR("Error in Sending TCP");
                 perror("What");
             }
-            return;
+            return false;
             // send failure msg to main prog and handle th 
         } else if (rc == -1) {
             LOG_ERR("Error in the TCP Connection...");
             perror("What");
-            return;
+            return false;
         }
     }
+    if (write_remain == 0) return true;
+    return false;
 }
 
 // uses a newly generated fd by epoll
-void read_tcp_buffer(int fd) {
+bool read_tcp_buffer(int fd) {
     // tcp_buffer_pointer
     int curr_read;
     size_t remaining = tcp_buffer_size - tcp_buffer_pointer;
     void *buff_point = tcp_buffer.data() + tcp_buffer_pointer;
+    LOG_DBG("remaining {} on TCP stream", remaining);
     while (tcp_buffer_pointer < tcp_buffer_size) {
         curr_read = recv(fd, buff_point, remaining, 0);
         if (curr_read > 0) {
@@ -530,20 +549,28 @@ void read_tcp_buffer(int fd) {
         }
         else if (curr_read == 0) {
             if (errno == EWOULDBLOCK || errno == EAGAIN) {
-                LOG_DBG("Waiting for more on TCP stream...");
+                LOG_DBG("READ 0 ON TCP STREAM");
                 break;
             } else {
                 LOG_ERR("Error in Reading TCP");
                 perror("What");
             }
-            return;
+            return false;
             // send failure msg to main prog and handle th 
         } else if (curr_read == -1) {
             LOG_ERR("Error in the TCP Connection...");
             perror("What");
-            return;
+            return false;
         }
     }
+    if (remaining == 0) {
+        return true;
+    }
+    return false;
+}
+
+std::vector<byte> return_tcp_buffer() {
+    return tcp_buffer;
 }
 
 std::vector<Packet> poll() {
@@ -564,8 +591,29 @@ std::vector<Packet> poll() {
         if (fd == udp_sfd) {
             recv_udp_packets(packets);
         } else if (fd == tcp_sfd && is_tcp_listening) {
-            accept_tcp_conns(packets);
-        } else if (is_tcp_reading) read_tcp_buffer(fd); 
+            accept_tcp_conns();
+        } else if (fd == tcp_sfd && is_tcp_reading) {
+            if (read_tcp_buffer(fd)) {
+                // send to itself
+                packets.push_back(Packet {
+                    .opcode = Opcode::Done_TCP,
+                    .player_num = config.pr_numb,
+                    .dest_num   = config.pr_numb,
+                    .seq = 0,
+                });
+            }
+        } else if (tcp_socks_to_addr.contains(fd)) {
+            if (write_tcp_buffer(fd)) {
+                // send to itself
+                auto fd_addr = tcp_socks_to_addr.at(fd);
+                packets.push_back(Packet {
+                    .opcode = Opcode::Done_TCP,
+                    .player_num = config.pr_numb,
+                    .dest_num   = config.pr_numb,
+                    .seq = 0,
+                });
+            }
+        }
     }
     return packets;
 }

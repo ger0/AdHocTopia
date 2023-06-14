@@ -8,10 +8,9 @@
 namespace networking {
 
 enum Opcode: byte {
-    Hello       = 0xF0 ,
+    Hello       = 0xF0,
     Ack         = 0x01,
-    Ask_map     = 0x02,
-    Send_map    = 0x03,
+    Done_TCP    = 0x02,
     Coord       = 0x04,
     Malformed   = 0xFF 
 };
@@ -53,11 +52,14 @@ bool setup(NetConfig &config);
 void destroy();
 void broadcast(Packet &pkt);
 void ack_to_player(byte num_to, byte num_from);
+void ack_to_player(byte num_to, byte num_from, uint byte_count);
 bool set_tcp_buffer(byte* byte_ptr, size_t size);
 // connects to player and sets a buffer to requested size
 bool connect_to_player(byte player_num, uint byte_count);
 bool start_tcp_listening();
 std::vector<Packet> poll();
 
+// request the tcp buffer
+std::vector<byte> return_tcp_buffer();
 };
 #endif //ADHTP_NETWORK_HDR

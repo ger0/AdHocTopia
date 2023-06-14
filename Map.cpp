@@ -4,6 +4,8 @@ inline byte &at(Map &self, const int x, const int y) {
     return self.data.at(x + y * self.WIDTH);
 }
 
+static constexpr int BRUSH_SIZE = 18;
+
 SDL_Colour get_cell_colour(byte cell) {
     switch (cell) {
         case CellType::START:
@@ -75,6 +77,18 @@ Vector2D Map::refl_vector(Vector2D const &vect, const float mx, const float my) 
     
     return reflect(norm_vect, surf_grad);
 }
+
+void Map::update(std::vector<byte> buff) {
+    memcpy(&this->data, buff.data(), buff.size());
+    for (int y = 0; y < HEIGHT; ++y) {
+    for (int x = 0; x < WIDTH; ++x) {
+        CellType value = (CellType)this->at_bnd(x, y);
+        LOG_DBG("VAL: {} {}", this->at_bnd(x, y), CellType::WALL);
+        _draw_at(*this, x, y, value, 1);
+    }
+    }
+    LOG_DBG("Refreshed the MAP STATE!");
+}
 void Map::handle_event(SDL_Event &event) {
     int x, y;
 
@@ -112,9 +126,8 @@ void Map::handle_event(SDL_Event &event) {
             break;
     } 
     if (_is_drawing && _brush_type != EMPTY) {
-        constexpr int size = 18;
-        _draw_at(*this, x, y, _brush_type, size);
-        _write_at(*this, x, y, _brush_type, size);
+        _draw_at(*this, x, y, _brush_type, BRUSH_SIZE);
+        _write_at(*this, x, y, _brush_type, BRUSH_SIZE);
     }
 }
 

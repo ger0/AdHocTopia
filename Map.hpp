@@ -7,6 +7,7 @@
 #include "types.hpp"
 #include <SDL2/SDL_pixels.h>
 #include <SDL2/SDL_render.h>
+#include <vector>
 
 enum CellType: byte {
     EMPTY   = 0x00,
@@ -25,6 +26,8 @@ struct Map {
     byte at_bnd(const int x, const int y) const;
     void handle_event(SDL_Event &event);
     Vector2D refl_vector(Vector2D const &vect, const float x, const float y) const;
+
+    void update(std::vector<byte> new_map);
 
     SDL_Texture *_texture   = nullptr;
 private:

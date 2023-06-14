@@ -72,7 +72,8 @@ GameState poll_packets(GameState state, Map &map, std::unordered_map<byte, Playe
         // adding a new player
         else if (pkt.opcode == networking::Opcode::Hello) {
             // sending TO pkt.player_num - id the ACK
-            networking::ack_to_player(pkt.player_num, PLAYER_NUM);
+            networking::ack_to_player(pkt.player_num, PLAYER_NUM, Map::SIZE);
+
             if (enemies.contains(pkt.player_num)) continue;
             Player enemy;
             enemy.colour = {
@@ -84,8 +85,7 @@ GameState poll_packets(GameState state, Map &map, std::unordered_map<byte, Playe
             enemies.emplace(pkt.player_num, enemy);
             LOG("Player: {} connected to the game!", pkt.player_num);
         }
-        else if (state < Streaming 
-                && pkt.opcode == networking::Opcode::Ack) {
+        else if (state < Streaming  && pkt.opcode == networking::Opcode::Ack) {
             LOG("Player: {} accepted to the game!", pkt.player_num);
             if (PLAYER_NUM > pkt.player_num) {
                 uint buff_size = pkt.payload.map_buff_size;
@@ -95,6 +95,10 @@ GameState poll_packets(GameState state, Map &map, std::unordered_map<byte, Playe
                 networking::start_tcp_listening();
             }
             state = Streaming;
+        } if (pkt.opcode == networking::Opcode::Done_TCP) {
+            // copy the buffer data to the map
+            auto tcp_buff = networking::return_tcp_buffer();
+            map.update(tcp_buff);
         }
     }
     return state;

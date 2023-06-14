@@ -23,29 +23,21 @@ bool setup_interface(int sock);
 constexpr uint SIZE_PKT = sizeof(Packet);
 constexpr uint MAX_BUFF_SIZE = 1024;
 
-struct Addr_entry {
-    byte player_num;
+struct PlayerEntry {
+    byte        player_num;
 
-    int tcp_sock = -1;
-    uint tcp_bytes_sent = 0;
-
+    int         tcp_sock           = -1;
+    uint        tcp_bytes_sent     = 0;
+    uint        tcp_buffer_size    = 0;
+    sockaddr_in saddr_in;        // self ip addr
 };
 
-/* player_num           -> player_sockaddr_in       */
-static std::unordered_map<byte, sockaddr_in>    player_addrs;
-
-/* sockaddr.in_addr_t   -> player_tcp_sfd           *
- * [for bitmap transmission]                        */
-static std::unordered_map<int, in_addr_t>       tcp_socks_to_addr;
-
-/* socket filedescriptor-> what part of the         *
- * bitmap has been sent so far                      */
-static std::unordered_map<int, size_t>          tcp_bytes_sent; 
+static std::unordered_map<byte, PlayerEntry>    player_entries;
 
 static constexpr uint MAX_EVENTS = 8;
 static epoll_event ev, events[MAX_EVENTS];
 
-static int udp_sfd = -1;
+static int      udp_sfd = -1;
 
 static int      tcp_sfd = -1;
 static bool     is_tcp_listening    = false;
@@ -105,7 +97,7 @@ Packet htonpkt(Packet &pkt) {
 
 // TCP READING
 bool connect_to_player(byte player_num, uint byte_count) {
-    if (!player_addrs.contains(player_num)) {
+    if (!player_entries.contains(player_num)) {
         LOG_ERR("FATAL: CANNOT CONNECT TO NONEXISTING PLAYER!!!");
         return false;
     }
@@ -114,7 +106,7 @@ bool connect_to_player(byte player_num, uint byte_count) {
         return false;
     }
     // retr addr from recvd UDP packets 
-    auto addr = player_addrs[player_num];
+    auto addr = player_entries.at(player_num).saddr_in;
     // the rest of the addr is identical
     addr.sin_port = htons(config.port - 1);
 
@@ -302,8 +294,8 @@ void destroy() {
     if (udp_sfd >= 0)    close(udp_sfd);
     if (tcp_sfd >= 0)    close(tcp_sfd);
     if (epollfd >= 0)    close(epollfd);
-    for (auto& [sock, _]: tcp_socks_to_addr) {
-        close(sock);
+    for (auto& [_, info]: player_entries) {
+        close(info.tcp_sock);
     }
 }
 
@@ -389,7 +381,7 @@ void ack_to_player(byte player_num, byte from_num, uint buff_size) {
 
     pkt = htonpkt(pkt);
 
-    const auto& s_addr = player_addrs[player_num];
+    const auto& s_addr = player_entries.at(player_num).saddr_in;
     int rv = sendto(udp_sfd, (void*)&pkt, sizeof(pkt), 0, (sockaddr*)&s_addr, sl);
     if (rv != sizeof(pkt)) {
         LOG_ERR("Not enough bytes sent!!! {}", rv);
@@ -425,13 +417,13 @@ void recv_udp_packets(std::vector<Packet> &packets) {
         // else receive the packet if its not from this address
         pkt = ntohpkt(pkt);
         packets.push_back(pkt);
-        if (!player_addrs.contains(pkt.player_num)) {
+        if (!player_entries.contains(pkt.player_num)) {
             LOG_DBG("Local addr: {}", local_addr);
             LOG_DBG("Added player's: {} address: {} to the list of known players", 
                     pkt.player_num, s_addr.sin_addr.s_addr);
 
             // add the player_num to list
-            player_addrs.emplace(pkt.player_num, s_addr);
+            player_entries.emplace(pkt.player_num, PlayerEntry{.saddr_in = s_addr});
         }
     }
 }
@@ -466,8 +458,8 @@ bool start_tcp_listening() {
 void accept_tcp_conns() {
     sockaddr_in cs_addr;
     socklen_t c_slen = sizeof(cs_addr);
-    int c_sfd = accept(tcp_sfd, (sockaddr *)&cs_addr, &c_slen);
-    if (c_sfd == -1) {
+    int c_sock = accept(tcp_sfd, (sockaddr *)&cs_addr, &c_slen);
+    if (c_sock == -1) {
         LOG_ERR("Failed to accept TCP client connection");
         perror("What");
         return;
@@ -476,29 +468,36 @@ void accept_tcp_conns() {
     // Add client socket to epoll
     epoll_event event;
     event.events = EPOLLOUT | EPOLLET;
-    event.data.fd = c_sfd;
+    event.data.fd = c_sock;
     // double-check later on
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, c_sfd, &event) == -1) {
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, c_sock, &event) == -1) {
         LOG_ERR("Failed to add client TCP socket to epoll.");
         perror("What");
         return;
     }
-    LOG_DBG("New TCP client connected. fd: [{}]", c_sfd);
-    in_addr_t caddr = cs_addr.sin_addr.s_addr;
-    tcp_socks_to_addr[c_sfd] = caddr;
-    tcp_bytes_sent[c_sfd] = 0;
+    LOG_DBG("New TCP client connected. fd: [{}]", c_sock);
+
+    // set values in the player_entries
+    // find by caddr, because the address is the only thing we know so far
+    for (auto& [player_num, info]: player_entries) {
+        if (info.saddr_in.sin_addr.s_addr == cs_addr.sin_addr.s_addr) {
+            info.tcp_sock       = c_sock;
+            info.tcp_bytes_sent = 0;
+        }
+        break;
+    }
 }
 
-bool write_tcp_buffer(int fd) {
-    LOG_DBG("Trying to send on TCP stream... fd: {}", fd);
+bool write_tcp_buffer(PlayerEntry &info, std::vector<Packet>& packets) {
+    LOG_DBG("Trying to send on TCP stream... fd: {}", info.tcp_sock);
     // how many bytes were written so far?
-    auto &write_point = tcp_bytes_sent.at(fd);
+    auto &write_point = info.tcp_bytes_sent;
     int write_remain = tcp_buffer_size - write_point;
     void *buff = tcp_buffer.data() + write_point;
     LOG_DBG("remaining bytes to send {}", write_remain);
 
     while (write_remain > 0) {
-        int rc = send(fd, buff, write_remain, 0);
+        int rc = send(info.tcp_sock, buff, write_remain, 0);
         if (rc > 0) {
             write_point += rc;
             write_remain -= rc;
@@ -524,7 +523,15 @@ bool write_tcp_buffer(int fd) {
             return false;
         }
     }
-    if (write_remain == 0) return true;
+    if (write_remain == 0) {
+        packets.push_back(Packet {
+            .opcode = Opcode::Done_TCP,
+            .player_num = info.player_num,
+            .dest_num   = config.pr_numb,
+            .seq = 0,
+        });
+        return true;
+    }
     return false;
 }
 
@@ -573,6 +580,13 @@ std::vector<byte> return_tcp_buffer() {
     return tcp_buffer;
 }
 
+int player_num_to_tcp_sock(int tcp_sock) {
+    for (auto& [num, info]: player_entries) {
+        if (info.tcp_sock == tcp_sock) return num;
+    }
+    return 0;
+}
+
 std::vector<Packet> poll() {
     std::vector<Packet> packets;
     int num_events = epoll_wait(epollfd, events, MAX_EVENTS, 24);
@@ -602,17 +616,8 @@ std::vector<Packet> poll() {
                     .seq = 0,
                 });
             }
-        } else if (tcp_socks_to_addr.contains(fd)) {
-            if (write_tcp_buffer(fd)) {
-                // send to itself
-                auto fd_addr = tcp_socks_to_addr.at(fd);
-                packets.push_back(Packet {
-                    .opcode = Opcode::Done_TCP,
-                    .player_num = config.pr_numb,
-                    .dest_num   = config.pr_numb,
-                    .seq = 0,
-                });
-            }
+        } else if (int p_num = player_num_to_tcp_sock(fd); p_num != 0) {
+            write_tcp_buffer(player_entries[p_num], packets);
         }
     }
     return packets;

@@ -428,7 +428,7 @@ void recv_udp_packets(std::vector<Packet> &packets) {
     }
 }
 
-bool start_tcp_listening() {
+bool listen_to_players() {
     if (is_tcp_listening) {
         LOG_ERR("TCP IS ALREADY LISTENING");
         return false;

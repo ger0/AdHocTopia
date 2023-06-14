@@ -56,7 +56,7 @@ void ack_to_player(byte num_to, byte num_from, uint byte_count);
 bool set_tcp_buffer(byte* byte_ptr, size_t size);
 // connects to player and sets a buffer to requested size
 bool connect_to_player(byte player_num, uint byte_count);
-bool start_tcp_listening();
+bool listen_to_players();
 std::vector<Packet> poll();
 
 // request the tcp buffer

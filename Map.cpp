@@ -83,7 +83,6 @@ void Map::update(std::vector<byte> buff) {
     for (int y = 0; y < HEIGHT; ++y) {
     for (int x = 0; x < WIDTH; ++x) {
         CellType value = (CellType)this->at_bnd(x, y);
-        LOG_DBG("VAL: {} {}", this->at_bnd(x, y), CellType::WALL);
         _draw_at(*this, x, y, value, 1);
     }
     }

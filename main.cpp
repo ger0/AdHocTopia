@@ -15,6 +15,8 @@
 #include "networking.hpp"
 #include "Player.hpp"
 
+using PlayersHMap = std::unordered_map<byte, Player>;
+
 constexpr uint PORT = 2113;
 constexpr uint MAP_PORT = 2114;
 
@@ -22,59 +24,91 @@ constexpr double TICK_RATE      = 32;
 constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
 static byte PLAYER_NUM;
-
 static uint SEED = 0;
 
-enum GameState {
-    Initializing,
-    Drawing,
-    Connecting,
-    Streaming,
-    Playing,
-    Ending,
-};
+// ------------- global variables --------------
 
-GameState poll_events(GameState state, Map &map, SDL_Event &event, Player &player) {
+static Player player;
+static PlayersHMap enemies;
+static Map map;
+
+static enum GameState {
+    Initializing,   // network conf, sdl setup...
+    Drawing,        // drawing the map
+    Connecting,     // trying to connect to all players
+    Streaming,      // streaming the map to all users
+    Playing,        // playing the game
+    Ending,         // finishing
+} game_state;
+
+void poll_events(SDL_Event &event) {
     while (SDL_PollEvent(&event) != 0) {
         if (event.type == SDL_QUIT) {
-            return GameState::Ending;
+            game_state = GameState::Ending;
         }
-        if (state == Playing) {
+        if (game_state == Playing) {
             player.handle_event(event);
         }
-        else if (state == Drawing) {
+        else if (game_state == Drawing) {
             map.handle_event(event);
         } 
         if (event.type == SDL_KEYDOWN 
             && event.key.keysym.sym == SDLK_SPACE) {
-            if (state == Drawing) state = Connecting;
-            LOG_DBG("Trying to connect to other players...", state);
+            if (game_state == Drawing) game_state = Connecting;
+            LOG_DBG("Game state {}...", game_state);
         }
     }
-    return state;
 }
 
-GameState poll_packets(GameState state, Map &map, std::unordered_map<byte, Player> &enemies) {
+bool is_everyone_ready(PlayersHMap enemies) {
+    for (auto& [pl_num, enemy]: enemies) {
+        if (!enemy.ready_to_play) return false;
+    }
+    return true;
+}
+
+void start_tcp_stream(const networking::Packet& pkt) {
+    if (PLAYER_NUM > pkt.player_num) {
+        uint buff_size = pkt.payload.map_buff_size;
+        networking::connect_to_player(pkt.player_num, buff_size);
+    } else {
+        networking::set_tcp_buffer(map.data.data(), Map::SIZE);
+        networking::listen_to_players();
+        if (is_everyone_ready(enemies)) {
+            //
+        }
+        LOG("Player: {} accepted to the game!", pkt.player_num);
+    }
+    game_state = Streaming;
+}
+
+
+void poll_packets() {
     auto packets = networking::poll();
 
     // [TODO]: Refactor
     for (const auto &pkt: packets) {
-        // if (pkt.player_num == player_num) continue;
-        // updating the position of a player
+        /* updating the position of a player    *
+         * sets the state to PLAYING            */
         if (pkt.opcode == networking::Opcode::Coord) {
-            //if (!enemies.contains(pkt.player_num)) continue;
+            // if (!enemies.contains(pkt.player_num)) continue;
             auto [x, y]     = pkt.payload.move.coord;
             auto [dx, dy]   = pkt.payload.move.d_vel;
             auto& enemy = enemies[pkt.player_num];
-            enemy.place(x, y, dx, dy);
+            enemy.set_new_data(x, y, dx, dy);
             enemy.should_predict = false;
+
+            game_state = Playing;
         } 
         // adding a new player
         else if (pkt.opcode == networking::Opcode::Hello) {
+
             // sending TO pkt.player_num - id the ACK
             networking::ack_to_player(pkt.player_num, PLAYER_NUM, Map::SIZE);
-
+            
+            // already exists
             if (enemies.contains(pkt.player_num)) continue;
+
             Player enemy;
             enemy.colour = {
                 .r = byte(155 + SEED % 100),
@@ -85,31 +119,58 @@ GameState poll_packets(GameState state, Map &map, std::unordered_map<byte, Playe
             enemies.emplace(pkt.player_num, enemy);
             LOG("Player: {} connected to the game!", pkt.player_num);
         }
-        else if (state < Streaming  && pkt.opcode == networking::Opcode::Ack) {
-            LOG("Player: {} accepted to the game!", pkt.player_num);
-            if (PLAYER_NUM > pkt.player_num) {
-                uint buff_size = pkt.payload.map_buff_size;
-                networking::connect_to_player(pkt.player_num, buff_size);
-            } else {
-                networking::set_tcp_buffer(map.data.data(), Map::SIZE);
-                networking::start_tcp_listening();
-            }
-            state = Streaming;
+        // STATE IS CONNECTING 
+        else if (game_state == Connecting && pkt.opcode == networking::Opcode::Ack) {
+            start_tcp_stream(pkt);
         } if (pkt.opcode == networking::Opcode::Done_TCP) {
             // copy the buffer data to the map
             auto tcp_buff = networking::return_tcp_buffer();
             map.update(tcp_buff);
         }
     }
-    return state;
 }
+
+void render_clear(SDL_Renderer *renderer, SDL_Texture *map_texture) {
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, map_texture, NULL, NULL);
+}
+
+void send_udp_packets() {
+    networking::Packet pkt = {
+        .opcode     = networking::Opcode::Coord,
+        .player_num = PLAYER_NUM,
+        .seq        = 0,
+        .payload    = {player.pos.x, player.pos.y, 
+            player.vel.x, player.vel.y},
+    };
+    if (game_state == Playing) {
+        networking::broadcast(pkt);
+    }
+    else if (game_state == Connecting) {
+        pkt.opcode = networking::Opcode::Hello;
+        networking::broadcast(pkt);
+    } //else if
+}
+
+void display_players(SDL_Renderer *renderer) {
+    player.update_position(map);
+    for (auto& [_, enemy]: enemies) {
+        if (enemy.should_predict) enemy.update_position(map);
+        else enemy.should_predict = true;
+        enemy.render(renderer);
+    }
+    player.render(renderer);
+}
+
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        LOG("Usage: {} <device> <essid> <player_id 1-254> <player_count 0-255>", argv[0]);
+        LOG("Usage: {} <device> <essid> <player_id 1-254>\
+<player_count 0-255>", argv[0]);
         return EXIT_FAILURE;
     }
-    GameState game_state = Initializing;
+    game_state = Initializing;
     const char net_msk[16]  = "255.255.255.0";
     const char bd_addr[16]  = "15.0.0.255";
     char ip_addr[16]        = "15.0.0.";
@@ -131,7 +192,6 @@ int main(int argc, char* argv[]) {
         perror("What"); 
         return EXIT_FAILURE;
     }
-    Map map;
 
     // -------------------------- sdl  init ---------------------------
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
@@ -164,9 +224,6 @@ int main(int argc, char* argv[]) {
     SDL_RenderClear(renderer);
     // Reset the target to the default rendering target (the window)
     SDL_SetRenderTarget(renderer, NULL);
-
-    Player player;
-    std::unordered_map<byte, Player> enemies;
     player.colour = {255, 255, 255, 255};
     player.player_num = PLAYER_NUM;
 
@@ -189,45 +246,23 @@ int main(int argc, char* argv[]) {
 
     // [TODO] Refactor
     while (game_state != GameState::Ending) {
-        game_state = poll_events(game_state, map, event, player);
-        game_state = poll_packets(game_state, map, enemies);
+        poll_events(event);
+        poll_packets();
 
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, map_texture, NULL, NULL);
+        render_clear(renderer, map_texture);
         if (game_state == Playing) {
-            player.move(map);
-            for (auto& [_, enemy]: enemies) {
-                if (enemy.should_predict) enemy.move(map);
-                else enemy.should_predict = true;
-                enemy.render(renderer);
-            }
-            player.render(renderer);
+            display_players(renderer);
         }
         SDL_RenderPresent(renderer);
 
-        // tick
-        networking::Packet pkt = {
-            .opcode     = networking::Opcode::Coord,
-            .player_num = PLAYER_NUM,
-            .seq        = 0,
-            .payload    = {player.pos.x, player.pos.y, 
-                player.vel.x, player.vel.y},
-        };
-
+        // tick synchro
         curr_tick = SDL_GetTicks64();
         delta_time = curr_tick - prev_tick;
         if ((double)delta_time >= TICK_MSEC_DUR) {
-            if (game_state == Playing) {
-                networking::broadcast(pkt);
-            }
-            else if (game_state == Connecting) {
-                pkt.opcode = networking::Opcode::Hello;
-                networking::broadcast(pkt);
-            }
             prev_tick = curr_tick;
+            send_udp_packets();
         }
-
+        // rendering synchro
         delta_frame = curr_tick - prev_frame;
         if (delta_frame < frame_min_dur) {
             SDL_Delay(uint(frame_min_dur - delta_frame));

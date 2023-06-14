@@ -109,14 +109,14 @@ void move_walking(Player &self, Map &map) {
     }
 }
 
-void Player::place(int x, int y, float vel_x, float vel_y) {
+void Player::set_new_data(int x, int y, float vel_x, float vel_y) {
     this->pos.x = x;
     this->pos.y = y;
     this->vel.x = vel_x;
     this->vel.y = vel_y;
 }
 
-void Player::move(Map &map) {
+void Player::update_position(Map &map) {
     // is on ground?
     byte curr_cell = map.at_bnd(pos.x, pos.y);
     // if standing on a wall 

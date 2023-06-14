@@ -34,16 +34,19 @@ struct Player {
     Direction direction = None;
 
     SDL_Colour colour;
+
+    bool ready_to_play = false;
     byte player_num;
+    
     // should predict the movement
     bool should_predict;     
     bool is_on_ground = false;
     bool has_jumped = false;
 
     // update movement information (sent through packets)
-    void place(int x, int y, float vel_x, float vel_y);
+    void set_new_data(int x, int y, float vel_x, float vel_y);
     // move the player based on the movement information
-    void move(Map &map);
+    void update_position(Map &map);
 
     void handle_event(SDL_Event& event);
     void render(SDL_Renderer* renderer) const;

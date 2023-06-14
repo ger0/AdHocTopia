@@ -21,12 +21,15 @@ constexpr uint MAP_PORT = 2114;
 constexpr double TICK_RATE      = 32;
 constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
-uint SEED = 0;
+static byte PLAYER_NUM;
+
+static uint SEED = 0;
 
 enum GameState {
     Initializing,
     Drawing,
     Connecting,
+    Streaming,
     Playing,
     Ending,
 };
@@ -68,8 +71,8 @@ GameState poll_packets(GameState state, std::unordered_map<byte, Player> &enemie
         } 
         // adding a new player
         else if (pkt.opcode == networking::Opcode::Hello) {
-            // sending THIS PLAYER'S id with ACK
-            networking::ack_to_player(pkt.player_num);
+            // sending TO pkt.player_num - id the ACK
+            networking::ack_to_player(pkt.player_num, PLAYER_NUM);
             if (enemies.contains(pkt.player_num)) continue;
             Player enemy;
             enemy.colour = {
@@ -81,17 +84,24 @@ GameState poll_packets(GameState state, std::unordered_map<byte, Player> &enemie
             enemies.emplace(pkt.player_num, enemy);
             LOG("Player: {} connected to the game!", pkt.player_num);
         }
-        else if (pkt.opcode == networking::Opcode::Ack) {
+        else if (state < Streaming 
+                && pkt.opcode == networking::Opcode::Ack) {
             LOG("Player: {} accepted to the game!", pkt.player_num);
-            state = Playing;
+            if (PLAYER_NUM > pkt.player_num) {
+                uint buff_size = pkt.payload.map_buff_size;
+                networking::connect_to_player(pkt.player_num, buff_size);
+            } else {
+                networking::start_tcp_listening();
+            }
+            state = Streaming;
         }
     }
     return state;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 4) {
-        LOG("Usage: {} <device> <essid> <ip_address>", argv[0]);
+    if (argc < 5) {
+        LOG("Usage: {} <device> <essid> <player_id 1-254> <player_count 0-255>", argv[0]);
         return EXIT_FAILURE;
     }
     GameState game_state = Initializing;
@@ -99,7 +109,8 @@ int main(int argc, char* argv[]) {
     const char bd_addr[16]  = "15.0.0.255";
     char ip_addr[16]        = "15.0.0.";
     strcat(ip_addr, argv[3]);
-    const byte player_num = atoi(argv[3]);
+    PLAYER_NUM = atoi(argv[3]);
+    const uint player_cnt = (uint)atoi(argv[4]);
 
     auto cfg = networking::NetConfig {
         .device     = argv[1],
@@ -107,7 +118,8 @@ int main(int argc, char* argv[]) {
         .ip_addr    = ip_addr,
         .net_msk    = net_msk,
         .bd_addr    = bd_addr,
-        .port       = PORT
+        .pr_numb    = PLAYER_NUM,
+        .port       = PORT,
     };
     defer {networking::destroy();};
     if (!networking::setup(cfg)) {
@@ -151,7 +163,7 @@ int main(int argc, char* argv[]) {
     Player player;
     std::unordered_map<byte, Player> enemies;
     player.colour = {255, 255, 255, 255};
-    player.player_num = player_num;
+    player.player_num = PLAYER_NUM;
 
 
     srand(time(NULL));
@@ -192,7 +204,7 @@ int main(int argc, char* argv[]) {
         // tick
         networking::Packet pkt = {
             .opcode     = networking::Opcode::Coord,
-            .player_num = player_num,
+            .player_num = PLAYER_NUM,
             .seq        = 0,
             .payload    = {player.pos.x, player.pos.y, 
                 player.vel.x, player.vel.y},

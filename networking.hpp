@@ -29,8 +29,7 @@ struct Packet {
     Opcode  opcode;
     byte    player_num;
 
-    byte    dest_num; // ACK specific;; 0 - all
-    byte    __padding__[1] = {0};
+    byte    __padding__[2] = {0,0};
 
     uint    seq; 
     Data    payload;

@@ -15,16 +15,31 @@
 #include "networking.hpp"
 #include "Player.hpp"
 
+enum GameState {
+    Initializing,   // network conf, sdl setup...       -> ---
+    Drawing,        // drawing the map                  -> ---
+    Connecting,     // trying to connect to all players -> HELLO
+    Streaming,      // streaming the map to all users   -> ACK
+    Awaiting,       // Waiting for others               -> TCP
+    Ready,          // waiting untill the min(id) starts-> TCP
+    Playing,        // playing the game                 -> CoordSend
+    Ending,         // finishing                        -> FIN
+};
+
 using PlayersHMap = std::unordered_map<byte, Player>;
+using PlayersStates = std::unordered_map<byte, GameState>;
 
 constexpr uint PORT = 2113;
-constexpr uint MAP_PORT = 2114;
 
+// tick rate
 constexpr double TICK_RATE      = 32;
 constexpr double TICK_MSEC_DUR  = 1'000 / TICK_RATE;
 
-static byte PLAYER_NUM;
+static byte PLAYER_NUM;     // this player's number (based on id)
+static byte N_PLAYERS;     // how many players should connect
 static uint SEED = 0;
+static byte SMALLEST_PLAYER_NUM;
+static bool STARTED_LISTENING = false;
 
 // ------------- global variables --------------
 
@@ -32,14 +47,8 @@ static Player player;
 static PlayersHMap enemies;
 static Map map;
 
-static enum GameState {
-    Initializing,   // network conf, sdl setup...
-    Drawing,        // drawing the map
-    Connecting,     // trying to connect to all players
-    Streaming,      // streaming the map to all users
-    Playing,        // playing the game
-    Ending,         // finishing
-} game_state;
+static GameState        game_state;
+static PlayersStates    enemyies_states;
 
 void poll_events(SDL_Event &event) {
     while (SDL_PollEvent(&event) != 0) {
@@ -60,28 +69,37 @@ void poll_events(SDL_Event &event) {
     }
 }
 
-bool is_everyone_ready(PlayersHMap enemies) {
-    for (auto& [pl_num, enemy]: enemies) {
-        if (!enemy.ready_to_play) return false;
+bool is_every_enemy(GameState expected) {
+    if (enemyies_states.size() < N_PLAYERS) return false;
+    for (auto& [_, state]: enemyies_states) {
+        if (state == expected) return true;
     }
-    return true;
+    return false;
 }
 
-void start_tcp_stream(const networking::Packet& pkt) {
-    if (PLAYER_NUM > pkt.player_num) {
-        uint buff_size = pkt.payload.map_buff_size;
-        networking::connect_to_player(pkt.player_num, buff_size);
-    } else {
-        networking::set_tcp_buffer(map.data.data(), Map::SIZE);
-        networking::listen_to_players();
-        if (is_everyone_ready(enemies)) {
-            //
-        }
-        LOG("Player: {} accepted to the game!", pkt.player_num);
-    }
+void start_tcp_listening() {
+    LOG_DBG("Started listening on TCP");
+    networking::set_tcp_buffer(map.data.data(), Map::SIZE);
+    networking::listen_to_players();
+}
+
+void start_tcp_reading(byte player_num, const uint byte_count) {
+    networking::connect_to_player(player_num, byte_count);
     game_state = Streaming;
 }
 
+void change_game_state_up(GameState& prev, GameState new_state) {
+    if (new_state > prev) {
+        prev = new_state;
+    }
+}
+
+void change_enemy_state(byte enemy, GameState new_state) {
+    if (!enemyies_states.contains(enemy)) {
+        enemyies_states.emplace(enemy, new_state);
+    }
+    change_game_state_up(enemyies_states.at(enemy), new_state);
+}
 
 void poll_packets() {
     auto packets = networking::poll();
@@ -98,16 +116,28 @@ void poll_packets() {
             enemy.set_new_data(x, y, dx, dy);
             enemy.should_predict = false;
 
-            game_state = Playing;
+            change_game_state_up(game_state, Playing);
         } 
         // adding a new player
-        else if (pkt.opcode == networking::Opcode::Hello) {
-
-            // sending TO pkt.player_num - id the ACK
-            networking::ack_to_player(pkt.player_num, PLAYER_NUM, Map::SIZE);
-            
+        else if (game_state != Drawing && pkt.opcode == networking::Opcode::Hello) {
             // already exists
             if (enemies.contains(pkt.player_num)) continue;
+
+            change_enemy_state(pkt.player_num, GameState::Connecting);
+            if (pkt.player_num < SMALLEST_PLAYER_NUM) SMALLEST_PLAYER_NUM = pkt.player_num;
+             
+            LOG("Player: {} connected to the game!", pkt.player_num);
+            // when everyone has connected, change state 
+            if (is_every_enemy(GameState::Connecting)) {
+                LOG("All players are in the Connecting state");
+                change_game_state_up(game_state, Streaming);
+
+                // the map's owner starts accepting on the TCP connection wayy before others
+                if (PLAYER_NUM == SMALLEST_PLAYER_NUM && STARTED_LISTENING == false) {
+                    start_tcp_listening();
+                    STARTED_LISTENING = true;
+                }
+            }
 
             Player enemy;
             enemy.colour = {
@@ -117,15 +147,40 @@ void poll_packets() {
                 .a = byte(255)
             };
             enemies.emplace(pkt.player_num, enemy);
-            LOG("Player: {} connected to the game!", pkt.player_num);
         }
-        // STATE IS CONNECTING 
-        else if (game_state == Connecting && pkt.opcode == networking::Opcode::Ack) {
-            start_tcp_stream(pkt);
-        } if (pkt.opcode == networking::Opcode::Done_TCP) {
+        // the lowest id sent ACK
+        else if (pkt.opcode == networking::Opcode::Ack) {
+            LOG("Player: {} accepted to the game!", pkt.player_num);
+            change_enemy_state(pkt.player_num, GameState::Streaming);
+            if (pkt.player_num < SMALLEST_PLAYER_NUM) SMALLEST_PLAYER_NUM = pkt.player_num;
+            // If we failed to receive all Hellos
+            change_game_state_up(game_state, Streaming);
+            if (pkt.player_num <= SMALLEST_PLAYER_NUM){
+                SMALLEST_PLAYER_NUM = pkt.player_num;
+                LOG("Connecting to sender... {}", pkt.player_num);
+                start_tcp_reading(SMALLEST_PLAYER_NUM, pkt.payload.map_buff_size);
+            }
+        } 
+        // finished TCP operations on some socket
+        if (pkt.opcode == networking::Opcode::Done_TCP) {
             // copy the buffer data to the map
-            auto tcp_buff = networking::return_tcp_buffer();
-            map.update(tcp_buff);
+            change_enemy_state(pkt.player_num, GameState::Ready);
+
+            // if we are the owner of a map
+            if (PLAYER_NUM == SMALLEST_PLAYER_NUM) {
+                change_game_state_up(game_state, Ready);
+
+                // check if everyone finished map stream 
+                if (is_every_enemy(GameState::Ready)) {
+                    change_game_state_up(game_state, Playing);
+                }
+            }
+            // otherwise load the map into the game
+            else if (PLAYER_NUM != SMALLEST_PLAYER_NUM) {
+                auto tcp_buff = networking::return_tcp_buffer();
+                map.update(tcp_buff);
+                change_game_state_up(game_state, Ready);
+            }
         }
     }
 }
@@ -147,10 +202,20 @@ void send_udp_packets() {
     if (game_state == Playing) {
         networking::broadcast(pkt);
     }
-    else if (game_state == Connecting) {
+    else if (game_state == Connecting || game_state == Streaming) {
         pkt.opcode = networking::Opcode::Hello;
+        pkt.player_num = PLAYER_NUM;
         networking::broadcast(pkt);
-    } //else if
+    } 
+    if (game_state == Streaming) {
+        // Make others connect to the map's owner
+        LOG_DBG("this: {} small: {}; SENDING ACK TO PLAYERS...", PLAYER_NUM, SMALLEST_PLAYER_NUM);
+        if (PLAYER_NUM == SMALLEST_PLAYER_NUM) {
+            pkt.opcode = networking::Opcode::Ack;
+            pkt.payload.map_buff_size = map.SIZE;
+            networking::broadcast(pkt);
+        }
+    }
 }
 
 void display_players(SDL_Renderer *renderer) {
@@ -175,8 +240,10 @@ int main(int argc, char* argv[]) {
     const char bd_addr[16]  = "15.0.0.255";
     char ip_addr[16]        = "15.0.0.";
     strcat(ip_addr, argv[3]);
-    PLAYER_NUM = atoi(argv[3]);
-    const uint player_cnt = (uint)atoi(argv[4]);
+    // check if true......
+    PLAYER_NUM  = atoi(argv[3]);
+    SMALLEST_PLAYER_NUM = PLAYER_NUM;
+    N_PLAYERS   = (byte)atoi(argv[4]);
 
     auto cfg = networking::NetConfig {
         .device     = argv[1],

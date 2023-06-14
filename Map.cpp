@@ -80,12 +80,17 @@ Vector2D Map::refl_vector(Vector2D const &vect, const float mx, const float my) 
 
 void Map::update(std::vector<byte> buff) {
     memcpy(&this->data, buff.data(), buff.size());
+    printf("\n");
+    printf("\n");
     for (int y = 0; y < HEIGHT; ++y) {
     for (int x = 0; x < WIDTH; ++x) {
-        CellType value = (CellType)this->at_bnd(x, y);
-        _draw_at(*this, x, y, value, 1);
+        auto value = this->at_bnd(x, y);
+        _draw_at(*this, x, y, (CellType)value, 1);
     }
+    printf("\n");
     }
+    printf("\n");
+    printf("\n");
     LOG_DBG("Refreshed the MAP STATE!");
 }
 void Map::handle_event(SDL_Event &event) {

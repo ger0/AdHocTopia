@@ -1,13 +1,10 @@
 CC := g++
-CFLAGS := -std=c++20 -Wall
-DEBUG_FLAG := -DDEBUG -g
+CFLAGS := -std=c++20 -Wall -g -DDEBUG
 LIBS := -lfmt -lSDL2
 
 SRC_FILES := main.cpp networking.cpp math.cpp Player.cpp Map.cpp
 
-ifdef DEBUG
-CFLAGS += $(DEBUG_FLAG)
-endif
+DEBUG: adhoctopia
 
 .PHONY: all clean
 

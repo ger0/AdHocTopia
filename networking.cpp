@@ -65,7 +65,6 @@ Packet ntohpkt(Packet &pkt) {
     Packet h_pkt = {
         .opcode             = pkt.opcode,
         .player_num         = pkt.player_num,
-        .dest_num           = pkt.dest_num,
         .seq                = ntohl(pkt.seq),
         .payload            = pkt.payload
     };
@@ -82,7 +81,6 @@ Packet htonpkt(Packet &pkt) {
     Packet n_pkt = {
         .opcode             = pkt.opcode,
         .player_num         = pkt.player_num,
-        .dest_num           = pkt.dest_num,
         .seq                = htonl(pkt.seq),
         .payload            = pkt.payload
     };
@@ -372,26 +370,10 @@ bool setup_interface(int sock) {
     return true;
 }
 
-void ack_to_player(byte player_num, byte from_num, uint buff_size) {
-    Packet pkt;
-    pkt.opcode = Opcode::Ack;
-    pkt.player_num  = from_num;
-    pkt.dest_num    = player_num;
-    pkt.payload.map_buff_size = buff_size;
-
-    pkt = htonpkt(pkt);
-
-    const auto& s_addr = player_entries.at(player_num).saddr_in;
-    int rv = sendto(udp_sfd, (void*)&pkt, sizeof(pkt), 0, (sockaddr*)&s_addr, sl);
-    if (rv != sizeof(pkt)) {
-        LOG_ERR("Not enough bytes sent!!! {}", rv);
-    }
-}
-//tes
-
 bool set_tcp_buffer(byte* byte_ptr, size_t size) {
     tcp_buffer_size = size;
     tcp_buffer = std::vector<byte>(size);
+    memcpy(tcp_buffer.data(), byte_ptr, size);
     return true;
 }
 
@@ -527,7 +509,6 @@ bool write_tcp_buffer(PlayerEntry &info, std::vector<Packet>& packets) {
         packets.push_back(Packet {
             .opcode = Opcode::Done_TCP,
             .player_num = info.player_num,
-            .dest_num   = config.pr_numb,
             .seq = 0,
         });
         return true;
@@ -607,12 +588,12 @@ std::vector<Packet> poll() {
         } else if (fd == tcp_sfd && is_tcp_listening) {
             accept_tcp_conns();
         } else if (fd == tcp_sfd && is_tcp_reading) {
+            // if the reading is complete ....
             if (read_tcp_buffer(fd)) {
                 // send to itself
                 packets.push_back(Packet {
                     .opcode = Opcode::Done_TCP,
                     .player_num = config.pr_numb,
-                    .dest_num   = config.pr_numb,
                     .seq = 0,
                 });
             }

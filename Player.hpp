@@ -24,8 +24,8 @@ struct Player {
 
     // position
     struct {
-        int x = 10;
-        int y = 10;
+        int x;
+        int y;
     } pos;
 
     // velocity
@@ -40,8 +40,8 @@ struct Player {
     
     // should predict the movement
     bool should_predict;     
-    bool is_on_ground = false;
     bool has_jumped = false;
+    bool needs_jump = false;
 
     // update movement information (sent through packets)
     void set_new_data(int x, int y, float vel_x, float vel_y);

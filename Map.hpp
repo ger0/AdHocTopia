@@ -27,6 +27,12 @@ struct Map {
     void handle_event(SDL_Event &event);
     Vector2D refl_vector(Vector2D const &vect, const float x, const float y) const;
 
+    std::tuple<int, int> start_point;
+    std::tuple<int, int> finish_point;
+
+    bool start_initialised  = false;
+    bool finish_initialised = false;
+    
     void update(std::vector<byte> new_map);
 
     SDL_Texture *_texture   = nullptr;

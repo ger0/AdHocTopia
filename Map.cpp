@@ -4,7 +4,7 @@ inline byte &at(Map &self, const int x, const int y) {
     return self.data.at(x + y * self.WIDTH);
 }
 
-static constexpr int BRUSH_SIZE = 18;
+static constexpr int BRUSH_SIZE = 13;
 
 SDL_Colour get_cell_colour(byte cell) {
     switch (cell) {
@@ -80,17 +80,20 @@ Vector2D Map::refl_vector(Vector2D const &vect, const float mx, const float my) 
 
 void Map::update(std::vector<byte> buff) {
     memcpy(&this->data, buff.data(), buff.size());
-    printf("\n");
-    printf("\n");
     for (int y = 0; y < HEIGHT; ++y) {
     for (int x = 0; x < WIDTH; ++x) {
         auto value = this->at_bnd(x, y);
         _draw_at(*this, x, y, (CellType)value, 1);
+        if ((CellType)value == START) {
+            this->start_point = std::tuple(x, y);
+            this->start_initialised = true;
+        }
+        if ((CellType)value == FINISH) {
+            this->finish_point = std::tuple(x, y);
+            this->finish_initialised = true;
+        }
     }
-    printf("\n");
     }
-    printf("\n");
-    printf("\n");
     LOG_DBG("Refreshed the MAP STATE!");
 }
 void Map::handle_event(SDL_Event &event) {
@@ -130,6 +133,20 @@ void Map::handle_event(SDL_Event &event) {
             break;
     } 
     if (_is_drawing && _brush_type != EMPTY) {
+        if (_brush_type == FINISH) {
+            if (!finish_initialised) {
+                finish_initialised = true;
+                finish_point = {x, y};
+            } else return;
+        }
+
+        if (_brush_type == START) {
+            if (!start_initialised) {
+                start_initialised = true;
+                start_point = {x, y};
+            } else return;
+        }
+
         _draw_at(*this, x, y, _brush_type, BRUSH_SIZE);
         _write_at(*this, x, y, _brush_type, BRUSH_SIZE);
     }

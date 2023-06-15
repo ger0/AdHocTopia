@@ -41,6 +41,9 @@ static uint SEED = 0;
 static byte SMALLEST_PLAYER_NUM;
 static bool STARTED_LISTENING = false;
 
+static bool PLAYING_SETUP;
+static u64 PLAY_CLOCK;
+
 // ------------- global variables --------------
 
 static Player player;
@@ -101,6 +104,23 @@ void change_enemy_state(byte enemy, GameState new_state) {
     change_game_state_up(enemyies_states.at(enemy), new_state);
 }
 
+
+void once_setup_playing_state() {
+    if (PLAYING_SETUP) return;
+
+    PLAY_CLOCK = SDL_GetTicks64();
+    PLAYING_SETUP = true;
+
+    if (!map.start_initialised) {
+        return;
+    }
+    const auto& [x, y] = map.start_point;
+    for (auto &[_, enemy]: enemies) {
+        enemy.set_new_data(x, y, 0, 0);
+    }
+    player.set_new_data(x, y, 0, 0);
+}
+
 void poll_packets() {
     auto packets = networking::poll();
 
@@ -117,6 +137,7 @@ void poll_packets() {
             enemy.should_predict = false;
 
             change_game_state_up(game_state, Playing);
+            once_setup_playing_state();
         } 
         // adding a new player
         else if (game_state != Drawing && pkt.opcode == networking::Opcode::Hello) {
@@ -140,6 +161,7 @@ void poll_packets() {
             }
 
             Player enemy;
+            enemy.pos = {Map::WIDTH / 2, Map::HEIGHT / 2};
             enemy.colour = {
                 .r = byte(155 + SEED % 100),
                 .g = byte((SEED / 256) % 256),
@@ -173,6 +195,7 @@ void poll_packets() {
                 // check if everyone finished map stream 
                 if (is_every_enemy(GameState::Ready)) {
                     change_game_state_up(game_state, Playing);
+                    once_setup_playing_state();
                 }
             }
             // otherwise load the map into the game
@@ -219,7 +242,6 @@ void send_udp_packets() {
 }
 
 void display_players(SDL_Renderer *renderer) {
-    player.update_position(map);
     for (auto& [_, enemy]: enemies) {
         if (enemy.should_predict) enemy.update_position(map);
         else enemy.should_predict = true;
@@ -286,6 +308,8 @@ int main(int argc, char* argv[]) {
     defer {SDL_DestroyWindow(window);};
     defer {SDL_Quit();};
 
+    player.pos = {Map::WIDTH / 2, Map::HEIGHT / 2};
+
     // Clear the texture to a specific color
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
@@ -318,6 +342,18 @@ int main(int argc, char* argv[]) {
 
         render_clear(renderer, map_texture);
         if (game_state == Playing) {
+            player.update_position(map);
+            auto const& x = player.pos.x;
+            auto const& y = player.pos.y;
+
+            if (map.at_bnd(x, y) == FINISH) {
+                PLAY_CLOCK = SDL_GetTicks64() - PLAY_CLOCK;
+                LOG(" --------------------------------------------- ");
+                LOG("       TIME ELAPSED (msec): {}", PLAY_CLOCK);
+                LOG(" --------------------------------------------- ");
+                change_game_state_up(game_state, Ending);
+            }
+
             display_players(renderer);
         }
         SDL_RenderPresent(renderer);

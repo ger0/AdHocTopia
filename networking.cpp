@@ -216,11 +216,6 @@ bool create_epoll() {
         perror("What");
         return false;
     }    
-    /* if (listen(tcp_sfd, (int)sizeof(Packet::player_num) - 2) == -1) {
-        LOG_ERR("Failed to listen on TCP sock");
-        perror("What");
-        return false;
-    } */
 
     // ADDING UDP SOCKET TO EPOLL
     ev.events = EPOLLIN | EPOLLET;
@@ -517,7 +512,7 @@ bool write_tcp_buffer(PlayerEntry &info, std::vector<Packet>& packets) {
 }
 
 // uses a newly generated fd by epoll
-bool read_tcp_buffer(int fd) {
+void read_tcp_buffer(int fd, std::vector<Packet>& packets) {
     // tcp_buffer_pointer
     int curr_read;
     size_t remaining = tcp_buffer_size - tcp_buffer_pointer;
@@ -543,18 +538,22 @@ bool read_tcp_buffer(int fd) {
                 LOG_ERR("Error in Reading TCP");
                 perror("What");
             }
-            return false;
+            return;
             // send failure msg to main prog and handle th 
         } else if (curr_read == -1) {
             LOG_ERR("Error in the TCP Connection...");
             perror("What");
-            return false;
+            return;
         }
     }
     if (remaining == 0) {
-        return true;
+        // send to itself
+        packets.push_back(Packet {
+            .opcode = Opcode::Done_TCP,
+            .player_num = config.pr_numb,
+            .seq = 0,
+        });
     }
-    return false;
 }
 
 std::vector<byte> return_tcp_buffer() {
@@ -588,15 +587,7 @@ std::vector<Packet> poll() {
         } else if (fd == tcp_sfd && is_tcp_listening) {
             accept_tcp_conns();
         } else if (fd == tcp_sfd && is_tcp_reading) {
-            // if the reading is complete ....
-            if (read_tcp_buffer(fd)) {
-                // send to itself
-                packets.push_back(Packet {
-                    .opcode = Opcode::Done_TCP,
-                    .player_num = config.pr_numb,
-                    .seq = 0,
-                });
-            }
+            read_tcp_buffer(fd, packets);
         } else if (int p_num = player_num_to_tcp_sock(fd); p_num != 0) {
             write_tcp_buffer(player_entries[p_num], packets);
         }

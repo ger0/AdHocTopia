@@ -1,5 +1,5 @@
 CC := g++
-CFLAGS := -std=c++20 -Wall -g -DDEBUG
+CFLAGS := -std=c++20 -Wall 
 LIBS := -lfmt -lSDL2
 
 SRC_FILES := main.cpp networking.cpp math.cpp Player.cpp Map.cpp

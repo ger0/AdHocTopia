@@ -95,7 +95,7 @@ Packet htonpkt(Packet &pkt) {
 
 // TCP READING
 bool connect_to_player(byte player_num, uint byte_count) {
-    if (!player_entries.contains(player_num)) {
+    if (player_entries.find(player_num) == player_entries.end()) {
         LOG_ERR("FATAL: CANNOT CONNECT TO NONEXISTING PLAYER!!!");
         return false;
     }
@@ -394,7 +394,7 @@ void recv_udp_packets(std::vector<Packet> &packets) {
         // else receive the packet if its not from this address
         pkt = ntohpkt(pkt);
         packets.push_back(pkt);
-        if (!player_entries.contains(pkt.player_num)) {
+        if (player_entries.find(pkt.player_num) == player_entries.end()) {
             LOG_DBG("Local addr: {}", local_addr);
             LOG_DBG("Added player's: {} address: {} to the list of known players", 
                     pkt.player_num, s_addr.sin_addr.s_addr);

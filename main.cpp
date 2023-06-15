@@ -98,7 +98,7 @@ void change_game_state_up(GameState& prev, GameState new_state) {
 }
 
 void change_enemy_state(byte enemy, GameState new_state) {
-    if (!enemyies_states.contains(enemy)) {
+    if (enemyies_states.find(enemy) == enemyies_states.end()) {
         enemyies_states.emplace(enemy, new_state);
     }
     change_game_state_up(enemyies_states.at(enemy), new_state);
@@ -129,7 +129,6 @@ void poll_packets() {
         /* updating the position of a player    *
          * sets the state to PLAYING            */
         if (pkt.opcode == networking::Opcode::Coord) {
-            // if (!enemies.contains(pkt.player_num)) continue;
             auto [x, y]     = pkt.payload.move.coord;
             auto [dx, dy]   = pkt.payload.move.d_vel;
             auto& enemy = enemies[pkt.player_num];
@@ -142,7 +141,7 @@ void poll_packets() {
         // adding a new player
         else if (game_state != Drawing && pkt.opcode == networking::Opcode::Hello) {
             // already exists
-            if (enemies.contains(pkt.player_num)) continue;
+            if (enemies.find(pkt.player_num) != enemies.end()) continue;
 
             change_enemy_state(pkt.player_num, GameState::Connecting);
             if (pkt.player_num < SMALLEST_PLAYER_NUM) SMALLEST_PLAYER_NUM = pkt.player_num;

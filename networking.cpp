@@ -57,8 +57,6 @@ static socklen_t sl = 0;
 static int epollfd = -1;
 
 static sockaddr_in  broadcast_addr;
-static sockaddr_in  recv_broadcast_addr;
-static sockaddr_in  this_addr;
 static sockaddr_in  tcp_this_addr;
 static in_addr_t    local_addr;
 
@@ -180,7 +178,7 @@ bool bind_addr(c_str device) {
         return false;
     }
     // RECV UDP binding
-    if (bind(recv_udp_sfd, (sockaddr*)&recv_broadcast_addr, sizeof(recv_broadcast_addr)) == -1) {
+    if (bind(recv_udp_sfd, (sockaddr*)&broadcast_addr, sizeof(broadcast_addr)) == -1) {
         LOG_ERR("Error during socket binding");
 		return false;
     };
@@ -266,18 +264,6 @@ bool setup(NetConfig &cfg) {
         .sin_port       = htons(config.port),
         .sin_addr       = {inet_addr(config.bd_addr)}
     };
-    // UDP broadcast listener
-    recv_broadcast_addr = {
-        .sin_family     = AF_INET,
-        .sin_port       = htons(config.port),
-        .sin_addr       = {inet_addr(config.bd_addr)},
-    };
-    // UDP address to receive requests from
-    this_addr = {
-        .sin_family     = AF_INET,
-        .sin_port       = htons(config.port),
-        .sin_addr       = {in_addr_t{INADDR_ANY}},
-    };
     // TCP address to accept connections from PORT = PORT - 1
     tcp_this_addr = {
         .sin_family     = AF_INET,
@@ -285,7 +271,7 @@ bool setup(NetConfig &cfg) {
         .sin_addr       = {in_addr_t{INADDR_ANY}},
     };
 
-    sl = sizeof(this_addr);
+    sl = sizeof(sockaddr_in);
     send_udp_sfd         = socket(AF_INET, SOCK_DGRAM,   IPPROTO_UDP);
     if (send_udp_sfd < 0) {
         LOG_ERR("Socket udp error!");

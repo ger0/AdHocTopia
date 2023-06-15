@@ -38,7 +38,7 @@ static std::unordered_map<byte, PlayerEntry>    player_entries;
 static constexpr uint MAX_EVENTS = 8;
 static epoll_event ev, events[MAX_EVENTS];
 
-static int      udp_sfd = -1;
+static int      send_udp_sfd = -1;
 static int      recv_udp_sfd = -1;
 
 static int      tcp_sfd = -1;
@@ -138,9 +138,13 @@ bool connect_to_player(byte player_num, uint byte_count) {
 
 void broadcast(Packet &pkt) {
     Packet n_pkt = htonpkt(pkt);
-    int rv = sendto(udp_sfd, (void*)&n_pkt, sizeof(n_pkt), 0, (sockaddr*)&broadcast_addr, sl);
-    if (rv <= 0) {
-        LOG_ERR("Did not send the entire packet: {}", rv);
+    socklen_t slen = sizeof(broadcast_addr);
+    int rv = sendto(send_udp_sfd, (void*)&n_pkt, sizeof(n_pkt), 0, (sockaddr*)&broadcast_addr, slen);
+    if (rv < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;
+        }
+        LOG_ERR("Failed to send: {}", rv);
         perror("what");
     }
 }
@@ -151,7 +155,7 @@ bool bind_addr(c_str device) {
     strncpy(ifr.ifr_name, device, sizeof(ifr.ifr_name));
 
     // bind a specific device to the socket ( might not be used later on )
-    if (setsockopt(udp_sfd, SOL_SOCKET, SO_BINDTODEVICE,
+    if (setsockopt(send_udp_sfd, SOL_SOCKET, SO_BINDTODEVICE,
                    (void *)&ifr, sizeof(ifr)) < 0) {
         LOG_ERR("Failed to bind device to the UDP socket");
         return false;
@@ -163,7 +167,7 @@ bool bind_addr(c_str device) {
     }
 
     int reuseAddr = 1;
-    if (setsockopt(udp_sfd, SOL_SOCKET, SO_REUSEADDR, &reuseAddr, sizeof(reuseAddr)) < 0) {
+    if (setsockopt(send_udp_sfd, SOL_SOCKET, SO_REUSEADDR, &reuseAddr, sizeof(reuseAddr)) < 0) {
         LOG_ERR("Failed to set SO_REUSEADDR for UDP sock");
         return false;
     }
@@ -175,12 +179,6 @@ bool bind_addr(c_str device) {
         LOG_ERR("Failed to set SO_REUSEADDR for TCP sock");
         return false;
     }
-
-    // UDP binding
-    if (bind(udp_sfd, (sockaddr*)&this_addr, sizeof(this_addr)) == -1) {
-        LOG_ERR("Error during socket binding");
-		return false;
-    };
     // RECV UDP binding
     if (bind(recv_udp_sfd, (sockaddr*)&recv_broadcast_addr, sizeof(recv_broadcast_addr)) == -1) {
         LOG_ERR("Error during socket binding");
@@ -215,8 +213,8 @@ bool create_epoll() {
     
     // set the sfd to be nonblocking for epoll
     // UDP
-    int flags = fcntl(udp_sfd, F_GETFL, 0);
-    if (fcntl(udp_sfd, F_SETFL, flags | O_NONBLOCK) == -1) {
+    int flags = fcntl(send_udp_sfd, F_GETFL, 0);
+    if (fcntl(send_udp_sfd, F_SETFL, flags | O_NONBLOCK) == -1) {
         LOG_ERR("Nonblocking socket error for UDP sock");
         perror("What");
         return false;
@@ -288,8 +286,8 @@ bool setup(NetConfig &cfg) {
     };
 
     sl = sizeof(this_addr);
-    udp_sfd         = socket(AF_INET, SOCK_DGRAM,   IPPROTO_UDP);
-    if (udp_sfd < 0) {
+    send_udp_sfd         = socket(AF_INET, SOCK_DGRAM,   IPPROTO_UDP);
+    if (send_udp_sfd < 0) {
         LOG_ERR("Socket udp error!");
         perror("What");
         return false;
@@ -306,7 +304,7 @@ bool setup(NetConfig &cfg) {
         perror("What");
         return false;
     }
-    if (!enable_sock_broadcast(udp_sfd)) {
+    if (!enable_sock_broadcast(send_udp_sfd)) {
         return false;
     }
     if(!bind_addr(config.device)) {
@@ -321,7 +319,7 @@ bool setup(NetConfig &cfg) {
 
 void destroy() {
     LOG_DBG("Cleaning up networking resources...");
-    if (udp_sfd >= 0)       close(udp_sfd);
+    if (send_udp_sfd >= 0)  close(send_udp_sfd);
     if (recv_udp_sfd >= 0)  close(recv_udp_sfd);
     if (tcp_sfd >= 0)       close(tcp_sfd);
     if (epollfd >= 0)       close(epollfd);
@@ -429,13 +427,13 @@ bool set_tcp_buffer(byte* byte_ptr, size_t size) {
     return true;
 }
 
-void recv_udp_packets(std::vector<Packet> &packets) {
+void recv_udp_packets(int fd, std::vector<Packet> &packets) {
     sockaddr_in s_addr;
     Packet pkt;
     socklen_t sockl = sizeof(s_addr);
 
     while (true) {
-        int rc = recvfrom(recv_udp_sfd, &pkt, SIZE_PKT, 0, (sockaddr*)&s_addr, &sockl);
+        int rc = recvfrom(fd, &pkt, SIZE_PKT, 0, (sockaddr*)&s_addr, &sockl);
         if (rc == 0) {
             break;
         } else if (rc != SIZE_PKT) {
@@ -490,10 +488,10 @@ bool listen_to_players() {
     return true;
 }
 
-void accept_tcp_conns() {
+void accept_tcp_conns(int fd) {
     sockaddr_in cs_addr;
     socklen_t c_slen = sizeof(cs_addr);
-    int c_sock = accept(tcp_sfd, (sockaddr *)&cs_addr, &c_slen);
+    int c_sock = accept(fd, (sockaddr *)&cs_addr, &c_slen);
     if (c_sock == -1) {
         LOG_ERR("Failed to accept TCP client connection");
         perror("What");
@@ -641,9 +639,9 @@ std::vector<Packet> poll() {
     for (int i = 0; i < num_events; ++i) {
         int fd = events[i].data.fd;
         if (fd == recv_udp_sfd) {
-            recv_udp_packets(packets);
+            recv_udp_packets(fd, packets);
         } else if (fd == tcp_sfd && is_tcp_listening) {
-            accept_tcp_conns();
+            accept_tcp_conns(fd);
         } else if (fd == tcp_sfd && is_tcp_reading) {
             read_tcp_buffer(fd, packets);
         } else if (int p_num = player_num_to_tcp_sock(fd); p_num != 0) {

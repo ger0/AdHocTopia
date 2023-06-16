@@ -624,7 +624,7 @@ std::vector<Packet> poll() {
     std::vector<Packet> packets;
     int num_events = epoll_wait(epollfd, events, MAX_EVENTS, 24);
     if (num_events == -1) {
-        if (EINTR) {
+        if (errno == EINTR) {
             LOG_DBG("Epoll skipping, program interrupted");
         } else {
             LOG_ERR("PANIC: Epoll wait failed");

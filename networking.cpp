@@ -19,25 +19,30 @@ namespace networking {
 
 bool setup_wlan(int sock);
 bool setup_interface(int sock);
+bool set_iface_down(int sock);
 
 constexpr uint SIZE_PKT = sizeof(Packet);
-constexpr uint MAX_BUFF_SIZE = 1024;
 
 struct PlayerEntry {
     byte        player_num;
 
-    int         tcp_sock           = -1;
-    uint        tcp_bytes_sent     = 0;
-    uint        tcp_buffer_size    = 0;
-    sockaddr_in saddr_in;        // self ip addr
+    int         tcp_sock            = -1;
+    uint        tcp_bytes_sent      = 0;
+    uint        tcp_buffer_size     = 0;
+    sockaddr_in saddr_in; 
+    size_t      last_seq            = 0;
 };
 
+/* player_num -> player_info entry                  */
 static std::unordered_map<byte, PlayerEntry>    player_entries;
 
 static constexpr uint MAX_EVENTS = 8;
 static epoll_event ev, events[MAX_EVENTS];
 
-static int      udp_sfd = -1;
+static uint     THIS_SEQ_NUM = 0;
+
+static int      send_udp_sfd = -1;
+static int      recv_udp_sfd = -1;
 
 static int      tcp_sfd = -1;
 static bool     is_tcp_listening    = false;
@@ -55,7 +60,6 @@ static socklen_t sl = 0;
 static int epollfd = -1;
 
 static sockaddr_in  broadcast_addr;
-static sockaddr_in  this_addr;
 static sockaddr_in  tcp_this_addr;
 static in_addr_t    local_addr;
 
@@ -112,7 +116,7 @@ bool connect_to_player(byte player_num, uint byte_count) {
     ev.data.fd = tcp_sfd;
 
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_sfd, &ev) == -1) {
-        LOG_ERR("Failed to modify TCP socket in epoll.");
+        LOG_ERR("Failed to add TCP socket to epoll.");
         perror("What");
         return false;
     }
@@ -134,10 +138,16 @@ bool connect_to_player(byte player_num, uint byte_count) {
 }
 
 void broadcast(Packet &pkt) {
+    ++THIS_SEQ_NUM;
+    pkt.seq = THIS_SEQ_NUM;
     Packet n_pkt = htonpkt(pkt);
-    int rv = sendto(udp_sfd, (void*)&n_pkt, sizeof(n_pkt), 0, (sockaddr*)&broadcast_addr, sl);
-    if (rv <= 0) {
-        LOG_ERR("Did not send the entire packet: {}", rv);
+    socklen_t slen = sizeof(broadcast_addr);
+    int rv = sendto(send_udp_sfd, (void*)&n_pkt, sizeof(n_pkt), 0, (sockaddr*)&broadcast_addr, slen);
+    if (rv < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;
+        }
+        LOG_ERR("Failed to send: {}", rv);
         perror("what");
     }
 }
@@ -148,7 +158,7 @@ bool bind_addr(c_str device) {
     strncpy(ifr.ifr_name, device, sizeof(ifr.ifr_name));
 
     // bind a specific device to the socket ( might not be used later on )
-    if (setsockopt(udp_sfd, SOL_SOCKET, SO_BINDTODEVICE,
+    if (setsockopt(send_udp_sfd, SOL_SOCKET, SO_BINDTODEVICE,
                    (void *)&ifr, sizeof(ifr)) < 0) {
         LOG_ERR("Failed to bind device to the UDP socket");
         return false;
@@ -160,17 +170,20 @@ bool bind_addr(c_str device) {
     }
 
     int reuseAddr = 1;
-    if (setsockopt(udp_sfd, SOL_SOCKET, SO_REUSEADDR, &reuseAddr, sizeof(reuseAddr)) < 0) {
+    if (setsockopt(send_udp_sfd, SOL_SOCKET, SO_REUSEADDR, &reuseAddr, sizeof(reuseAddr)) < 0) {
         LOG_ERR("Failed to set SO_REUSEADDR for UDP sock");
+        return false;
+    }
+    if (setsockopt(recv_udp_sfd, SOL_SOCKET, SO_REUSEADDR, &reuseAddr, sizeof(reuseAddr)) < 0) {
+        LOG_ERR("Failed to set SO_REUSEADDR for Recv UDP sock");
         return false;
     }
     if (setsockopt(tcp_sfd, SOL_SOCKET, SO_REUSEADDR, &reuseAddr, sizeof(reuseAddr)) < 0) {
         LOG_ERR("Failed to set SO_REUSEADDR for TCP sock");
         return false;
     }
-
-    // UDP binding
-    if (bind(udp_sfd, (sockaddr*)&this_addr, sizeof(this_addr)) == -1) {
+    // RECV UDP binding
+    if (bind(recv_udp_sfd, (sockaddr*)&broadcast_addr, sizeof(broadcast_addr)) == -1) {
         LOG_ERR("Error during socket binding");
 		return false;
     };
@@ -203,9 +216,16 @@ bool create_epoll() {
     
     // set the sfd to be nonblocking for epoll
     // UDP
-    int flags = fcntl(udp_sfd, F_GETFL, 0);
-    if (fcntl(udp_sfd, F_SETFL, flags | O_NONBLOCK) == -1) {
+    int flags = fcntl(send_udp_sfd, F_GETFL, 0);
+    if (fcntl(send_udp_sfd, F_SETFL, flags | O_NONBLOCK) == -1) {
         LOG_ERR("Nonblocking socket error for UDP sock");
+        perror("What");
+        return false;
+    }
+    // RECV UDP
+    flags = fcntl(recv_udp_sfd, F_GETFL, 0);
+    if (fcntl(recv_udp_sfd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        LOG_ERR("Nonblocking socket error for RECV UDP sock");
         perror("What");
         return false;
     }
@@ -219,9 +239,9 @@ bool create_epoll() {
 
     // ADDING UDP SOCKET TO EPOLL
     ev.events = EPOLLIN | EPOLLET;
-    ev.data.fd = udp_sfd;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, udp_sfd, &ev) == -1) {
-        LOG_ERR("Epoll_ctl failed when adding UDP sock");
+    ev.data.fd = recv_udp_sfd;
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, recv_udp_sfd, &ev) == -1) {
+        LOG_ERR("Epoll_ctl failed when adding Recv UDP sock");
         perror("What"); 
         return false;
     }
@@ -238,6 +258,7 @@ bool setup(NetConfig &cfg) {
     }
     // close socket opon returning
     defer {close(sock);};
+    if (!set_iface_down(sock))  return false;
     if (!setup_wlan(sock))      return false;
     if (!setup_interface(sock)) return false;
     LOG_DBG("Ad hoc network created successfully!");
@@ -248,12 +269,6 @@ bool setup(NetConfig &cfg) {
         .sin_port       = htons(config.port),
         .sin_addr       = {inet_addr(config.bd_addr)}
     };
-    // UDP address to receive requests from
-    this_addr = {
-        .sin_family     = AF_INET,
-        .sin_port       = htons(config.port),
-        .sin_addr       = {in_addr_t{INADDR_ANY}},
-    };
     // TCP address to accept connections from PORT = PORT - 1
     tcp_this_addr = {
         .sin_family     = AF_INET,
@@ -261,15 +276,26 @@ bool setup(NetConfig &cfg) {
         .sin_addr       = {in_addr_t{INADDR_ANY}},
     };
 
-    sl = sizeof(this_addr);
-    udp_sfd = socket(AF_INET, SOCK_DGRAM,   IPPROTO_UDP);
-    tcp_sfd = socket(AF_INET, SOCK_STREAM,  IPPROTO_TCP);
-    if (udp_sfd < 0) {
-        LOG_ERR("Socket error!");
+    sl = sizeof(sockaddr_in);
+    send_udp_sfd         = socket(AF_INET, SOCK_DGRAM,   IPPROTO_UDP);
+    if (send_udp_sfd < 0) {
+        LOG_ERR("Socket udp error!");
         perror("What");
         return false;
     }
-    if (!enable_sock_broadcast(udp_sfd)) {
+    recv_udp_sfd    = socket(AF_INET, SOCK_DGRAM,   IPPROTO_UDP);
+    if (recv_udp_sfd < 0) {
+        LOG_ERR("Socket recv_udp error!");
+        perror("What");
+        return false;
+    }
+    tcp_sfd         = socket(AF_INET, SOCK_STREAM,  IPPROTO_TCP);
+    if (tcp_sfd < 0) {
+        LOG_ERR("Socket tcp error!");
+        perror("What");
+        return false;
+    }
+    if (!enable_sock_broadcast(send_udp_sfd)) {
         return false;
     }
     if(!bind_addr(config.device)) {
@@ -284,9 +310,10 @@ bool setup(NetConfig &cfg) {
 
 void destroy() {
     LOG_DBG("Cleaning up networking resources...");
-    if (udp_sfd >= 0)    close(udp_sfd);
-    if (tcp_sfd >= 0)    close(tcp_sfd);
-    if (epollfd >= 0)    close(epollfd);
+    if (send_udp_sfd >= 0)  close(send_udp_sfd);
+    if (recv_udp_sfd >= 0)  close(recv_udp_sfd);
+    if (tcp_sfd >= 0)       close(tcp_sfd);
+    if (epollfd >= 0)       close(epollfd);
     for (auto& [_, info]: player_entries) {
         close(info.tcp_sock);
     }
@@ -296,11 +323,12 @@ void destroy() {
 bool setup_wlan(int sock) {
     const auto& cfg = config;
     struct iwreq iwr; // wireless  settings
+
     memset(&iwr, 0, sizeof(iwr));
     strncpy(iwr.ifr_name, cfg.device, IFNAMSIZ);
 
     memset(&iwr.u, 0, sizeof(iwr.u));
-    iwr.u.mode |= IW_MODE_ADHOC;
+    iwr.u.mode = IW_MODE_ADHOC;
     if (ioctl(sock, SIOCSIWMODE, &iwr)) {
         LOG_ERR("Failed to set the wireless interface to ad-hoc mode");
         return false;
@@ -312,6 +340,24 @@ bool setup_wlan(int sock) {
     if (ioctl(sock, SIOCSIWESSID, &iwr)) {
         LOG_ERR("Failed to set the ESSID");
         return false;
+    }
+    return true;
+}
+bool set_iface_down(int sock) {
+    const auto& cfg = config;
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, cfg.device, IFNAMSIZ);
+
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr)) {
+        LOG_ERR("Failed to retrieve interface flags");
+        return false;
+    }
+    // set the interface DOWN
+    ifr.ifr_flags = ~IFF_UP;
+    if (ioctl(sock, SIOCSIFFLAGS, &ifr)) {
+        LOG_ERR("Failed to set interface DOWN");
+		return false;
     }
     return true;
 }
@@ -372,12 +418,13 @@ bool set_tcp_buffer(byte* byte_ptr, size_t size) {
     return true;
 }
 
-void recv_udp_packets(std::vector<Packet> &packets) {
+void recv_udp_packets(int fd, std::vector<Packet> &packets) {
     sockaddr_in s_addr;
     Packet pkt;
+    socklen_t sockl = sizeof(s_addr);
 
     while (true) {
-        int rc = recvfrom(udp_sfd, &pkt, SIZE_PKT, 0, (sockaddr*)&s_addr, &sl);
+        int rc = recvfrom(fd, &pkt, SIZE_PKT, 0, (sockaddr*)&s_addr, &sockl);
         if (rc == 0) {
             break;
         } else if (rc != SIZE_PKT) {
@@ -393,7 +440,6 @@ void recv_udp_packets(std::vector<Packet> &packets) {
 
         // else receive the packet if its not from this address
         pkt = ntohpkt(pkt);
-        packets.push_back(pkt);
         if (!player_entries.contains(pkt.player_num)) {
             LOG_DBG("Local addr: {}", local_addr);
             LOG_DBG("Added player's: {} address: {} to the list of known players", 
@@ -401,6 +447,13 @@ void recv_udp_packets(std::vector<Packet> &packets) {
 
             // add the player_num to list
             player_entries.emplace(pkt.player_num, PlayerEntry{.saddr_in = s_addr});
+        }
+
+        // send the packet to the game if the most recent one received
+        auto &last_seq = player_entries.at(pkt.player_num).last_seq;
+        if (pkt.seq >= last_seq) {
+            packets.push_back(pkt);
+            last_seq = pkt.seq;
         }
     }
 }
@@ -432,10 +485,10 @@ bool listen_to_players() {
     return true;
 }
 
-void accept_tcp_conns() {
+void accept_tcp_conns(int fd) {
     sockaddr_in cs_addr;
     socklen_t c_slen = sizeof(cs_addr);
-    int c_sock = accept(tcp_sfd, (sockaddr *)&cs_addr, &c_slen);
+    int c_sock = accept(fd, (sockaddr *)&cs_addr, &c_slen);
     if (c_sock == -1) {
         LOG_ERR("Failed to accept TCP client connection");
         perror("What");
@@ -571,7 +624,7 @@ std::vector<Packet> poll() {
     std::vector<Packet> packets;
     int num_events = epoll_wait(epollfd, events, MAX_EVENTS, 24);
     if (num_events == -1) {
-        if (EINTR) {
+        if (errno == EINTR) {
             LOG_DBG("Epoll skipping, program interrupted");
         } else {
             LOG_ERR("PANIC: Epoll wait failed");
@@ -582,13 +635,16 @@ std::vector<Packet> poll() {
     }
     for (int i = 0; i < num_events; ++i) {
         int fd = events[i].data.fd;
-        if (fd == udp_sfd) {
-            recv_udp_packets(packets);
-        } else if (fd == tcp_sfd && is_tcp_listening) {
-            accept_tcp_conns();
-        } else if (fd == tcp_sfd && is_tcp_reading) {
+        if (fd == recv_udp_sfd) {
+            recv_udp_packets(fd, packets);
+        } 
+        else if (fd == tcp_sfd && is_tcp_listening) {
+            accept_tcp_conns(fd);
+        } 
+        else if (fd == tcp_sfd && is_tcp_reading) {
             read_tcp_buffer(fd, packets);
-        } else if (int p_num = player_num_to_tcp_sock(fd); p_num != 0) {
+        } 
+        else if (int p_num = player_num_to_tcp_sock(fd); p_num != 0) {
             write_tcp_buffer(player_entries[p_num], packets);
         }
     }

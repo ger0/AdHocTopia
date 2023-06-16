@@ -35,18 +35,20 @@ void _write_at(Map &self, const int x, const int y, byte value, const int size) 
 }
 void _draw_at(Map &self, const int x, const int y, const CellType value, const int size) {
     // Set the target texture
-    SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), self._texture);
+    SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(0)), self._texture);
+	auto &renderer = self._renderer;
+	SDL_SetRenderTarget(renderer, self._texture);
 
     // Draw
     SDL_Rect rect = {x, y, size, size};
     SDL_Color col = get_cell_colour(value);
     SDL_SetRenderDrawColor(
-        SDL_GetRenderer(SDL_GetWindowFromID(1)), col.r, col.g, col.g, col.a);
+        renderer, col.r, col.g, col.g, col.a);
     SDL_RenderFillRect(
-        SDL_GetRenderer(SDL_GetWindowFromID(1)), &rect);
+        renderer, &rect);
 
     // Reset the target to the default rendering target (the window)
-    SDL_SetRenderTarget(SDL_GetRenderer(SDL_GetWindowFromID(1)), NULL);
+    SDL_SetRenderTarget(renderer, NULL);
 }
 
 // calculates a reflection based on surface's gradient at point mx, my

@@ -41,7 +41,6 @@ static uint SEED = 0;
 static byte SMALLEST_PLAYER_NUM;
 static bool STARTED_LISTENING = false;
 
-static bool PLAYING_SETUP;
 static u64 PLAY_CLOCK;
 
 // ------------- global variables --------------
@@ -94,6 +93,7 @@ void start_tcp_reading(byte player_num, const uint byte_count) {
 void change_game_state_up(GameState& prev, GameState new_state) {
     if (new_state > prev) {
         prev = new_state;
+        if (new_state == Playing) PLAY_CLOCK = SDL_GetTicks64();
     }
 }
 
@@ -105,12 +105,7 @@ void change_enemy_state(byte enemy, GameState new_state) {
 }
 
 
-void once_setup_playing_state() {
-    if (PLAYING_SETUP) return;
-
-    PLAY_CLOCK = SDL_GetTicks64();
-    PLAYING_SETUP = true;
-
+void setup_playing_state() {
     if (!map.start_initialised) {
         return;
     }
@@ -129,7 +124,6 @@ void poll_packets() {
         /* updating the position of a player    *
          * sets the state to PLAYING            */
         if (pkt.opcode == networking::Opcode::Coord) {
-            // if (!enemies.contains(pkt.player_num)) continue;
             auto [x, y]     = pkt.payload.move.coord;
             auto [dx, dy]   = pkt.payload.move.d_vel;
             auto& enemy = enemies[pkt.player_num];
@@ -137,7 +131,6 @@ void poll_packets() {
             enemy.should_predict = false;
 
             change_game_state_up(game_state, Playing);
-            once_setup_playing_state();
         } 
         // adding a new player
         else if (game_state != Drawing && pkt.opcode == networking::Opcode::Hello) {
@@ -195,7 +188,7 @@ void poll_packets() {
                 // check if everyone finished map stream 
                 if (is_every_enemy(GameState::Ready)) {
                     change_game_state_up(game_state, Playing);
-                    once_setup_playing_state();
+                    setup_playing_state();
                 }
             }
             // otherwise load the map into the game
@@ -203,6 +196,7 @@ void poll_packets() {
                 auto tcp_buff = networking::return_tcp_buffer();
                 map.update(tcp_buff);
                 change_game_state_up(game_state, Ready);
+                setup_playing_state();
             }
         }
     }
@@ -253,8 +247,7 @@ void display_players(SDL_Renderer *renderer) {
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        LOG("Usage: {} <device> <essid> <player_id 1-254>\
-<player_count 0-255>", argv[0]);
+        LOG("Usage: {} <device> <essid> <player_id 1-254> <player_count 0-255>", argv[0]);
         return EXIT_FAILURE;
     }
     game_state = Initializing;
@@ -302,6 +295,7 @@ int main(int argc, char* argv[]) {
         Map::WIDTH, Map::HEIGHT 
     );
     map._texture = map_texture;
+	map._renderer = renderer;
 
     defer {SDL_DestroyTexture(map_texture);};
     defer {SDL_DestroyRenderer(renderer);};

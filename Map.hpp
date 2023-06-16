@@ -36,6 +36,7 @@ struct Map {
     void update(std::vector<byte> new_map);
 
     SDL_Texture *_texture   = nullptr;
+	SDL_Renderer *_renderer = nullptr;
 private:
     bool        _is_drawing = false;
     CellType    _brush_type = CellType::EMPTY;

@@ -22,21 +22,24 @@ bool setup_interface(int sock);
 bool set_iface_down(int sock);
 
 constexpr uint SIZE_PKT = sizeof(Packet);
-constexpr uint MAX_BUFF_SIZE = 1024;
 
 struct PlayerEntry {
     byte        player_num;
 
-    int         tcp_sock           = -1;
-    uint        tcp_bytes_sent     = 0;
-    uint        tcp_buffer_size    = 0;
-    sockaddr_in saddr_in;        // self ip addr
+    int         tcp_sock            = -1;
+    uint        tcp_bytes_sent      = 0;
+    uint        tcp_buffer_size     = 0;
+    sockaddr_in saddr_in; 
+    size_t      last_seq            = 0;
 };
 
+/* player_num -> player_info entry                  */
 static std::unordered_map<byte, PlayerEntry>    player_entries;
 
 static constexpr uint MAX_EVENTS = 8;
 static epoll_event ev, events[MAX_EVENTS];
+
+static uint     THIS_SEQ_NUM = 0;
 
 static int      send_udp_sfd = -1;
 static int      recv_udp_sfd = -1;
@@ -113,7 +116,7 @@ bool connect_to_player(byte player_num, uint byte_count) {
     ev.data.fd = tcp_sfd;
 
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_sfd, &ev) == -1) {
-        LOG_ERR("Failed to modify TCP socket in epoll.");
+        LOG_ERR("Failed to add TCP socket to epoll.");
         perror("What");
         return false;
     }
@@ -135,6 +138,8 @@ bool connect_to_player(byte player_num, uint byte_count) {
 }
 
 void broadcast(Packet &pkt) {
+    ++THIS_SEQ_NUM;
+    pkt.seq = THIS_SEQ_NUM;
     Packet n_pkt = htonpkt(pkt);
     socklen_t slen = sizeof(broadcast_addr);
     int rv = sendto(send_udp_sfd, (void*)&n_pkt, sizeof(n_pkt), 0, (sockaddr*)&broadcast_addr, slen);
@@ -435,7 +440,6 @@ void recv_udp_packets(int fd, std::vector<Packet> &packets) {
 
         // else receive the packet if its not from this address
         pkt = ntohpkt(pkt);
-        packets.push_back(pkt);
         if (player_entries.find(pkt.player_num) == player_entries.end()) {
             LOG_DBG("Local addr: {}", local_addr);
             LOG_DBG("Added player's: {} address: {} to the list of known players", 
@@ -443,6 +447,13 @@ void recv_udp_packets(int fd, std::vector<Packet> &packets) {
 
             // add the player_num to list
             player_entries.emplace(pkt.player_num, PlayerEntry{.saddr_in = s_addr});
+        }
+
+        // send the packet to the game if the most recent one received
+        auto &last_seq = player_entries.at(pkt.player_num).last_seq;
+        if (pkt.seq >= last_seq) {
+            packets.push_back(pkt);
+            last_seq = pkt.seq;
         }
     }
 }
@@ -626,11 +637,14 @@ std::vector<Packet> poll() {
         int fd = events[i].data.fd;
         if (fd == recv_udp_sfd) {
             recv_udp_packets(fd, packets);
-        } else if (fd == tcp_sfd && is_tcp_listening) {
+        } 
+        else if (fd == tcp_sfd && is_tcp_listening) {
             accept_tcp_conns(fd);
-        } else if (fd == tcp_sfd && is_tcp_reading) {
+        } 
+        else if (fd == tcp_sfd && is_tcp_reading) {
             read_tcp_buffer(fd, packets);
-        } else if (int p_num = player_num_to_tcp_sock(fd); p_num != 0) {
+        } 
+        else if (int p_num = player_num_to_tcp_sock(fd); p_num != 0) {
             write_tcp_buffer(player_entries[p_num], packets);
         }
     }

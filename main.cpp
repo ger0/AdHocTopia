@@ -41,7 +41,6 @@ static uint SEED = 0;
 static byte SMALLEST_PLAYER_NUM;
 static bool STARTED_LISTENING = false;
 
-static bool PLAYING_SETUP;
 static u64 PLAY_CLOCK;
 
 // ------------- global variables --------------
@@ -105,12 +104,7 @@ void change_enemy_state(byte enemy, GameState new_state) {
 }
 
 
-void once_setup_playing_state() {
-    if (PLAYING_SETUP) return;
-
-    PLAY_CLOCK = SDL_GetTicks64();
-    PLAYING_SETUP = true;
-
+void setup_playing_state() {
     if (!map.start_initialised) {
         return;
     }
@@ -136,7 +130,7 @@ void poll_packets() {
             enemy.should_predict = false;
 
             change_game_state_up(game_state, Playing);
-            once_setup_playing_state();
+            PLAY_CLOCK = SDL_GetTicks64();
         } 
         // adding a new player
         else if (game_state != Drawing && pkt.opcode == networking::Opcode::Hello) {
@@ -194,7 +188,7 @@ void poll_packets() {
                 // check if everyone finished map stream 
                 if (is_every_enemy(GameState::Ready)) {
                     change_game_state_up(game_state, Playing);
-                    once_setup_playing_state();
+                    setup_playing_state();
                 }
             }
             // otherwise load the map into the game
@@ -202,6 +196,7 @@ void poll_packets() {
                 auto tcp_buff = networking::return_tcp_buffer();
                 map.update(tcp_buff);
                 change_game_state_up(game_state, Ready);
+                setup_playing_state();
             }
         }
     }
